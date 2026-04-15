@@ -84,48 +84,63 @@ const toApiUser = (row) => ({
   status: row.status,
 });
 
+let usersRoleSchemaReadyPromise = null;
+
 const ensureUsersRoleSchema = async (connection) => {
-  try {
-    await connection.execute("ALTER TABLE users MODIFY COLUMN role VARCHAR(50) NOT NULL DEFAULT 'employee'");
-  } catch (e) {}
+  if (usersRoleSchemaReadyPromise != null) {
+    return usersRoleSchemaReadyPromise;
+  }
+
+  usersRoleSchemaReadyPromise = (async () => {
+    try {
+      await connection.execute("ALTER TABLE users MODIFY COLUMN role VARCHAR(50) NOT NULL DEFAULT 'employee'");
+    } catch (e) {}
+
+    try {
+      await connection.execute(`
+        UPDATE users
+        SET role = CASE
+          WHEN role IS NULL OR TRIM(role) = '' THEN 'employee'
+          WHEN LOWER(TRIM(role)) IN ('admin', 'super_admin', 'superadmin') THEN 'super_admin'
+          WHEN LOWER(TRIM(role)) IN ('administrativo', 'administrative') THEN 'administrative'
+          WHEN LOWER(TRIM(role)) IN (
+            'manager',
+            'cordinador',
+            'cordinador_operativo',
+            'cordinador_operaciones',
+            'coordinador',
+            'coordinador_operativo',
+            'coordinador_operaciones',
+            'coordinador_operacion',
+            'coordinator_operations'
+          ) THEN 'manager'
+          WHEN LOWER(TRIM(role)) IN ('lider', 'leader') THEN 'leader'
+          WHEN LOWER(TRIM(role)) IN ('empleado', 'colaborador') THEN 'employee'
+          WHEN LOWER(TRIM(role)) IN (
+            'almacen',
+            'bodega',
+            'warehouse',
+            'logistica',
+            'warehouse_logistics',
+            'warehouse_logistic',
+            'almacen_logistica',
+            'almacen_y_logistica',
+            'logistica_almacen'
+          ) THEN 'warehouse_logistics'
+          WHEN LOWER(TRIM(role)) IN ('management') THEN 'gerencial'
+          WHEN LOWER(TRIM(role)) IN ('commercial', 'comercial', 'asesor_comercial', 'ejecutivo_comercial', 'commercial_advisor') THEN 'commercial'
+          ELSE LOWER(TRIM(role))
+        END
+      `);
+    } catch (e) {}
+  })();
 
   try {
-    await connection.execute(`
-      UPDATE users
-      SET role = CASE
-        WHEN role IS NULL OR TRIM(role) = '' THEN 'employee'
-        WHEN LOWER(TRIM(role)) IN ('admin', 'super_admin', 'superadmin') THEN 'super_admin'
-        WHEN LOWER(TRIM(role)) IN ('administrativo', 'administrative') THEN 'administrative'
-        WHEN LOWER(TRIM(role)) IN (
-          'manager',
-          'cordinador',
-          'cordinador_operativo',
-          'cordinador_operaciones',
-          'coordinador',
-          'coordinador_operativo',
-          'coordinador_operaciones',
-          'coordinador_operacion',
-          'coordinator_operations'
-        ) THEN 'manager'
-        WHEN LOWER(TRIM(role)) IN ('lider', 'leader') THEN 'leader'
-        WHEN LOWER(TRIM(role)) IN ('empleado', 'colaborador') THEN 'employee'
-        WHEN LOWER(TRIM(role)) IN (
-          'almacen',
-          'bodega',
-          'warehouse',
-          'logistica',
-          'warehouse_logistics',
-          'warehouse_logistic',
-          'almacen_logistica',
-          'almacen_y_logistica',
-          'logistica_almacen'
-        ) THEN 'warehouse_logistics'
-        WHEN LOWER(TRIM(role)) IN ('management') THEN 'gerencial'
-        WHEN LOWER(TRIM(role)) IN ('commercial', 'comercial', 'asesor_comercial', 'ejecutivo_comercial', 'commercial_advisor') THEN 'commercial'
-        ELSE LOWER(TRIM(role))
-      END
-    `);
-  } catch (e) {}
+    await usersRoleSchemaReadyPromise;
+  } catch (error) {
+    usersRoleSchemaReadyPromise = null;
+    throw error;
+  }
 };
 
 // Obtener todos los usuarios
