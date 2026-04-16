@@ -227,7 +227,7 @@ describe('Allowances endpoints', () => {
     expect(res.body.message).toBe('No se puede asignar viático a un proyecto finalizado');
   });
 
-  it('allows leader and coordinator to create allowance requests but blocks administrative creation', async () => {
+  it('allows leader, coordinator and commercial to create allowance requests but blocks administrative creation', async () => {
     const leaderRes = await request(app)
       .post('/api/allowances/requests')
       .set('Authorization', `Bearer ${leaderToken}`)
@@ -255,6 +255,26 @@ describe('Allowances endpoints', () => {
 
     expect(coordinatorRes.statusCode).toBe(201);
 
+    const commercialLogin = await loginAs({
+      email: `commercial.allowance.${Date.now()}@skaler.com`,
+      password: '123456',
+      role: 'commercial',
+      name: `Commercial Allowance Request ${Date.now()}`,
+    });
+
+    const commercialRes = await request(app)
+      .post('/api/allowances/requests')
+      .set('Authorization', `Bearer ${commercialLogin.token}`)
+      .send({
+        project_id: activeProjectId,
+        departure_date: '2026-04-11',
+        return_date: '2026-04-12',
+        budget_transport: 16000,
+        notes: 'Solicitud creada por comercial',
+      });
+
+    expect(commercialRes.statusCode).toBe(201);
+
     const adminRes = await request(app)
       .post('/api/allowances/requests')
       .set('Authorization', `Bearer ${administrativeToken}`)
@@ -269,7 +289,7 @@ describe('Allowances endpoints', () => {
     expect(adminRes.statusCode).toBe(403);
   });
 
-  it('allows only administrative profiles to approve allowance requests', async () => {
+  it('allows administrative and gerencial profiles to approve allowance requests', async () => {
     const requestRes = await request(app)
       .post('/api/allowances/requests')
       .set('Authorization', `Bearer ${leaderToken}`)
@@ -299,6 +319,36 @@ describe('Allowances endpoints', () => {
     expect(adminDecisionRes.statusCode).toBe(200);
     expect(adminDecisionRes.body.data.status).toBe('approved');
     expect(adminDecisionRes.body.data.approver_name).toBeDefined();
+
+    const requestResForGerencial = await request(app)
+      .post('/api/allowances/requests')
+      .set('Authorization', `Bearer ${leaderToken}`)
+      .send({
+        project_id: activeProjectId,
+        departure_date: '2026-04-16',
+        return_date: '2026-04-17',
+        budget_transport: 9500,
+        notes: 'Solicitud pendiente de aprobacion gerencial',
+      });
+
+    expect(requestResForGerencial.statusCode).toBe(201);
+    const secondRequestId = requestResForGerencial.body.data.id;
+
+    const gerencialLogin = await loginAs({
+      email: `gerencial.allowance.${Date.now()}@skaler.com`,
+      password: '123456',
+      role: 'gerencial',
+      name: `Gerencial Allowance Approval ${Date.now()}`,
+    });
+
+    const gerencialDecisionRes = await request(app)
+      .patch(`/api/allowances/requests/${secondRequestId}/status`)
+      .set('Authorization', `Bearer ${gerencialLogin.token}`)
+      .send({ status: 'approved', decision_notes: 'Aprobada por gerencial' });
+
+    expect(gerencialDecisionRes.statusCode).toBe(200);
+    expect(gerencialDecisionRes.body.data.status).toBe('approved');
+    expect(gerencialDecisionRes.body.data.approver_name).toBeDefined();
   });
 
   afterAll(async () => {

@@ -47,7 +47,8 @@ const canCreateAllowanceRequest = (normalizedRole) => {
   return normalizedRole === 'super_admin'
     || normalizedRole === 'leader'
     || normalizedRole === 'supervisor'
-    || normalizedRole === 'coordinator_operations';
+    || normalizedRole === 'coordinator_operations'
+    || normalizedRole === 'commercial';
 };
 
 const normalizeAllowanceRequestStatus = (value) => {
@@ -421,7 +422,7 @@ const ensureAllowancesShape = async (connection) => {
 };
 
 const canManageAllowanceRequestDecision = async ({ connection, requestRow, userId, normalizedRole }) => {
-  if (normalizedRole === 'super_admin' || normalizedRole === 'administrative') {
+  if (normalizedRole === 'super_admin' || normalizedRole === 'administrative' || normalizedRole === 'gerencial') {
     return true;
   }
 
@@ -451,7 +452,7 @@ const listAllowances = async (req, res) => {
         OR pa.leader_user_id = ?
       )`);
       params.push(req.user.id, normalizedRole, req.user.id);
-    } else if (normalizedRole === 'employee') {
+    } else if (normalizedRole === 'commercial' || normalizedRole === 'employee') {
       conditions.push('1 = 0');
     }
 
@@ -907,7 +908,7 @@ const listAllowanceRequests = async (req, res) => {
         OR ar.responsible_user_id = ?
       )`);
       params.push(req.user.id, normalizedRole, req.user.id, req.user.id);
-    } else if (normalizedRole === 'employee') {
+    } else if (normalizedRole === 'commercial' || normalizedRole === 'employee') {
       conditions.push('(ar.requester_user_id = ? OR ar.responsible_user_id = ?)');
       params.push(req.user.id, req.user.id);
     }
@@ -931,7 +932,7 @@ const createAllowanceRequest = async (req, res) => {
     if (!canCreateAllowanceRequest(normalizedRole)) {
       return res.status(403).json({
         success: false,
-        message: 'Solo líder, supervisor o coordinación operativa pueden radicar solicitudes de viáticos',
+        message: 'Solo líder, supervisor, coordinación operativa o comercial pueden radicar solicitudes de viáticos',
       });
     }
 
@@ -1150,7 +1151,8 @@ const updateAllowanceRequestStatus = async (req, res) => {
     if (
       Number(requestRow.requester_user_id) === Number(req.user.id) &&
       normalizedRole !== 'super_admin' &&
-      normalizedRole !== 'administrative'
+      normalizedRole !== 'administrative' &&
+      normalizedRole !== 'gerencial'
     ) {
       return res.status(409).json({
         success: false,

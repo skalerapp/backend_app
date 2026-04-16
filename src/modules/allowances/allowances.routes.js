@@ -7,8 +7,8 @@ router.get('/', verifyToken, verifyModuleAccess('allowances', 'read'), controlle
 router.get('/requests', verifyToken, verifyModuleAccess('allowances', 'read'), controller.listAllowanceRequests);
 router.get('/project/:projectId', verifyToken, verifyModuleAccess('allowances', 'read'), controller.getAllowanceByProject);
 router.post('/assign', verifyToken, verifyModuleAccess('allowances', 'create'), controller.assignAllowance);
-router.post('/requests', verifyToken, verifyRole('leader', 'supervisor', 'coordinator_operations'), controller.createAllowanceRequest);
-router.patch('/requests/:requestId/status', verifyToken, verifyRole('administrative'), controller.updateAllowanceRequestStatus);
+router.post('/requests', verifyToken, verifyRole('leader', 'supervisor', 'coordinator_operations', 'commercial'), controller.createAllowanceRequest);
+router.patch('/requests/:requestId/status', verifyToken, verifyRole('administrative', 'gerencial'), controller.updateAllowanceRequestStatus);
 router.get('/project/:projectId/expenses', verifyToken, verifyModuleAccess('allowances', 'read'), controller.listExpensesByProject);
 router.post('/project/:projectId/expenses', verifyToken, verifyModuleAccess('allowances', 'update'), controller.addExpense);
 router.patch('/project/:projectId/expenses/:expenseId/request', verifyToken, verifyModuleAccess('allowances', 'update'), controller.reclassifyExpenseToRequest);
