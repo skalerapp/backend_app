@@ -436,6 +436,11 @@ const listAllowances = async (req, res) => {
     await ensureOperationalScopeShape(connection);
 
     const normalizedRole = normalizeRole(req.user?.role);
+    if (normalizedRole === 'commercial') {
+      connection.release();
+      return res.json({ success: true, data: [] });
+    }
+
     const conditions = [];
     const params = [];
 
@@ -452,7 +457,7 @@ const listAllowances = async (req, res) => {
         OR pa.leader_user_id = ?
       )`);
       params.push(req.user.id, normalizedRole, req.user.id);
-    } else if (normalizedRole === 'commercial' || normalizedRole === 'employee') {
+    } else if (normalizedRole === 'employee') {
       conditions.push('1 = 0');
     }
 
