@@ -104,7 +104,7 @@ const allowanceRequestSelect = `
     ar.created_at,
     ar.updated_at
   FROM allowance_requests ar
-  INNER JOIN projects p ON p.id = ar.project_id
+  LEFT JOIN projects p ON p.id = ar.project_id
   LEFT JOIN users requester ON requester.id = ar.requester_user_id
   LEFT JOIN users responsible ON responsible.id = ar.responsible_user_id
   LEFT JOIN users approver ON approver.id = ar.approver_user_id
@@ -329,7 +329,7 @@ const ensureAllowancesShape = async (connection) => {
   await connection.execute(`
     CREATE TABLE IF NOT EXISTS allowance_requests (
       id INT AUTO_INCREMENT PRIMARY KEY,
-      project_id INT NOT NULL,
+      project_id INT NULL,
       requester_user_id INT NOT NULL,
       responsible_user_id INT NULL,
       status VARCHAR(40) NOT NULL DEFAULT 'submitted',
@@ -394,6 +394,12 @@ const ensureAllowancesShape = async (connection) => {
     await connection.execute('ALTER TABLE allowance_requests ADD COLUMN applied_to_allowance_at DATETIME NULL');
   } catch (error) {
     // ignore if column already exists
+  }
+
+  try {
+    await connection.execute('ALTER TABLE allowance_requests MODIFY COLUMN project_id INT NULL');
+  } catch (error) {
+    // ignore if the engine/schema already allows nulls or cannot modify in current state
   }
 
   try {
@@ -971,10 +977,13 @@ const createAllowanceRequest = async (req, res) => {
       status: 'submitted',
     };
 
-    if (!payload.project_id || !payload.departure_date || !payload.return_date) {
+    const requiresProject = normalizedRole !== 'commercial';
+    if ((!payload.project_id && requiresProject) || !payload.departure_date || !payload.return_date) {
       return res.status(400).json({
         success: false,
-        message: 'Proyecto, fecha de salida y fecha de regreso son obligatorios',
+        message: requiresProject
+          ? 'Proyecto, fecha de salida y fecha de regreso son obligatorios'
+          : 'Fecha de salida y fecha de regreso son obligatorias',
       });
     }
 
@@ -999,21 +1008,23 @@ const createAllowanceRequest = async (req, res) => {
     await ensureAllowancesShape(connection);
     await ensureOperationalScopeShape(connection);
 
-    const [projectRows] = await connection.execute('SELECT id, name, status FROM projects WHERE id = ? LIMIT 1', [payload.project_id]);
-    if (!projectRows.length) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Proyecto no encontrado' });
+    if (payload.project_id) {
+      const [projectRows] = await connection.execute('SELECT id, name, status FROM projects WHERE id = ? LIMIT 1', [payload.project_id]);
+      if (!projectRows.length) {
+        connection.release();
+        return res.status(404).json({ success: false, message: 'Proyecto no encontrado' });
+      }
+
+      if (isFinalProjectStatus(projectRows[0].status)) {
+        connection.release();
+        return res.status(409).json({
+          success: false,
+          message: 'No se puede crear una solicitud sobre un proyecto finalizado',
+        });
+      }
     }
 
-    if (isFinalProjectStatus(projectRows[0].status)) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'No se puede crear una solicitud sobre un proyecto finalizado',
-      });
-    }
-
-    if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
+    if (payload.project_id && (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations')) {
       const hasProjectAccess = await canAccessProjectByOperationalScope({
         connection,
         userId: req.user.id,

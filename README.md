@@ -100,6 +100,31 @@ GET https://TU-BACKEND.railway.app/api/health
 => {"success":true,"message":"Backend funcionando"}
 ```
 
+### 5.1. Checklist de despliegue para viáticos comerciales
+
+Usa esta lista cuando el cambio incluya permisos o flujo de viáticos para el rol `commercial`.
+
+1. Confirmar que Railway despliega desde `backend/`.
+2. Verificar que las variables `JWT_SECRET`, `CORS_ORIGINS`, `FRONTEND_URL` y `WEB_APP_URL` correspondan al entorno productivo actual.
+3. Ejecutar redeploy del servicio backend después de subir cambios en:
+  - `src/config/moduleAccessPolicy.js`
+  - `src/modules/allowances/allowances.routes.js`
+  - `src/modules/allowances/allowances.controller.js`
+4. Confirmar healthcheck `GET /api/health` en la URL pública de Railway.
+5. Probar login desde la app Flutter apuntando a la URL Railway.
+6. Validar con usuario `commercial`:
+  - Puede abrir viáticos sin error.
+  - Puede crear solicitud de viáticos.
+  - Puede ver seguimiento de su solicitud.
+7. Validar con usuario `administrative` o `gerencial`:
+  - Puede abrir solicitudes pendientes.
+  - Puede aprobar o rechazar la solicitud del comercial.
+8. Validar nuevamente con usuario `commercial`:
+  - Ve la solicitud aprobada o rechazada en seguimiento.
+  - Si queda aprobada, puede abrir la bolsa y registrar gasto.
+
+Si alguno de estos pasos falla en Railway pero funciona local, revisar primero que el despliegue activo corresponda al último commit y que no exista una instancia antigua apuntando a otra rama o a otra carpeta raíz.
+
 ## Estructura de directorios
 
 ```
