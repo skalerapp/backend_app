@@ -33,6 +33,20 @@ const ensureEvidenceShape = async (connection) => {
   }
 };
 
+const normalizeActivityId = (value) => {
+  if (value == null || value === '') return null;
+  const parsed = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+};
+
+const normalizeProjectId = (value) => {
+  if (value == null || value === '') return null;
+  const parsed = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+};
+
 const uploadEvidence = async (req, res) => {
   try {
     if (!req.file) {
@@ -41,6 +55,8 @@ const uploadEvidence = async (req, res) => {
 
     const { activity_id, project_id, module_type } = req.body;
     const uploadedBy = req.user && req.user.id ? req.user.id : null;
+    const normalizedActivityId = normalizeActivityId(activity_id);
+    const normalizedProjectId = normalizeProjectId(project_id);
 
     // Ruta relativa para almacenar en BD
     const relativePath = path.relative(path.join(__dirname, '../../'), req.file.path).replace(/\\/g, '/');
@@ -49,7 +65,7 @@ const uploadEvidence = async (req, res) => {
     await ensureEvidenceShape(connection);
     const [result] = await connection.execute(
       'INSERT INTO evidence (activity_id, project_id, module_type, file_path, file_name, file_size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
-      [activity_id || null, project_id || null, module_type || 'general', relativePath, req.file.originalname, req.file.size, uploadedBy]
+      [normalizedActivityId, normalizedProjectId, module_type || 'general', relativePath, req.file.originalname, req.file.size, uploadedBy]
     );
     connection.release();
 

@@ -85,6 +85,114 @@ const ensureAttendanceShape = async (connection) => {
   } catch (e) {}
 };
 
+const ATTENDANCE_SELECT_FIELDS = `
+  SELECT
+    a.id,
+    a.employee_id,
+    COALESCE(a.user_id, e.user_id) AS user_id,
+    a.project_id,
+    a.check_in,
+    a.check_out,
+    a.location_latitude,
+    a.location_longitude,
+    a.checkout_location_latitude,
+    a.checkout_location_longitude,
+    a.attendance_date,
+    a.photo_path,
+    a.checkout_photo_path,
+    a.created_at,
+    a.updated_at,
+    p.name AS project_name,
+    COALESCE(e.identification_number, '') AS identification_number,
+    COALESCE(e.position, '') AS employee_position,
+    COALESCE(e.department, '') AS employee_department,
+    COALESCE(e.employee_name, user_direct.name, u.name) AS employee_name,
+    COALESCE(user_direct.name, u.name) AS app_user_name,
+    COALESCE(user_direct.email, u.email) AS app_user_email
+  FROM attendance a
+  LEFT JOIN projects p ON a.project_id = p.id
+  LEFT JOIN employees e ON a.employee_id = e.id
+  LEFT JOIN users user_direct ON a.user_id = user_direct.id
+  LEFT JOIN users u ON e.user_id = u.id
+`;
+
+const buildAttendanceFilters = ({
+  req,
+  employeeId,
+  userId,
+  attendanceDate,
+  dateFrom,
+  dateTo,
+  projectId,
+}) => {
+  const conditions = [];
+  const params = [];
+  const normalizedRole = normalizeRole(req.user?.role);
+
+  if (employeeId) {
+    conditions.push('a.employee_id = ?');
+    params.push(employeeId);
+  }
+
+  if (userId) {
+    conditions.push('COALESCE(a.user_id, e.user_id) = ?');
+    params.push(userId);
+  }
+
+  if (attendanceDate) {
+    conditions.push('a.attendance_date = ?');
+    params.push(attendanceDate);
+  }
+
+  if (dateFrom) {
+    conditions.push('a.attendance_date >= ?');
+    params.push(dateFrom);
+  }
+
+  if (dateTo) {
+    conditions.push('a.attendance_date <= ?');
+    params.push(dateTo);
+  }
+
+  if (projectId) {
+    conditions.push('a.project_id = ?');
+    params.push(projectId);
+  }
+
+  const isOwnUserFilter = userId && Number(userId) === Number(req.user.id);
+  if (!isOwnUserFilter) {
+    const visibility = buildOperationalVisibilityFilter({
+      normalizedRole,
+      userId: req.user.id,
+      projectAlias: 'p',
+      employeeUserExpression: 'e.user_id',
+    });
+    if (visibility.clause) {
+      conditions.push(visibility.clause);
+      params.push(...visibility.params);
+    }
+  }
+
+  return {
+    where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+    params,
+  };
+};
+
+const canExportHrAttendanceReport = (roleValue) => {
+  const role = normalizeRole(roleValue);
+  return role === 'super_admin' || role === 'administrative';
+};
+
+const parseIsoDate = (value) => {
+  if (!value) return null;
+  const normalized = value.toString().trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return null;
+  }
+  return normalized;
+};
+
 const getAttendance = async (req, res) => {
   try {
     const { employee_id, user_id, attendance_date } = req.query;
@@ -92,69 +200,15 @@ const getAttendance = async (req, res) => {
     await ensureAttendanceShape(connection);
     await ensureOperationalScopeShape(connection);
 
-    const conditions = [];
-    const params = [];
-
-    if (employee_id) {
-      conditions.push('a.employee_id = ?');
-      params.push(employee_id);
-    }
-
-    if (user_id) {
-      conditions.push('COALESCE(a.user_id, e.user_id) = ?');
-      params.push(user_id);
-    }
-
-    if (attendance_date) {
-      conditions.push('a.attendance_date = ?');
-      params.push(attendance_date);
-    }
-
-    const normalizedRole = normalizeRole(req.user?.role);
-
-    const isOwnUserFilter = user_id && Number(user_id) === Number(req.user.id);
-
-    if (!isOwnUserFilter) {
-      const visibility = buildOperationalVisibilityFilter({
-        normalizedRole,
-        userId: req.user.id,
-        projectAlias: 'p',
-        employeeUserExpression: 'e.user_id',
-      });
-      if (visibility.clause) {
-        conditions.push(visibility.clause);
-        params.push(...visibility.params);
-      }
-    }
-
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { where, params } = buildAttendanceFilters({
+      req,
+      employeeId: employee_id,
+      userId: user_id,
+      attendanceDate: attendance_date,
+    });
 
     const [rows] = await connection.execute(
-      `SELECT
-         a.id,
-         a.employee_id,
-        COALESCE(a.user_id, e.user_id) AS user_id,
-         a.project_id,
-         a.check_in,
-         a.check_out,
-         a.location_latitude,
-         a.location_longitude,
-         a.checkout_location_latitude,
-         a.checkout_location_longitude,
-         a.attendance_date,
-         a.photo_path,
-         a.checkout_photo_path,
-         a.created_at,
-         a.updated_at,
-         p.name AS project_name,
-         COALESCE(e.employee_name, user_direct.name, u.name) AS employee_name,
-         COALESCE(user_direct.name, u.name) AS app_user_name,
-         COALESCE(user_direct.email, u.email) AS app_user_email
-       FROM attendance a
-       LEFT JOIN projects p ON a.project_id = p.id
-       LEFT JOIN employees e ON a.employee_id = e.id
-       LEFT JOIN users user_direct ON a.user_id = user_direct.id
-       LEFT JOIN users u ON e.user_id = u.id
+      `${ATTENDANCE_SELECT_FIELDS}
        ${where}
        ORDER BY a.attendance_date DESC, a.check_in DESC`,
       params
@@ -165,6 +219,77 @@ const getAttendance = async (req, res) => {
   } catch (error) {
     console.error('getAttendance error:', error);
     res.status(500).json({ success: false, message: 'Error al obtener asistencia', error: error.message });
+  }
+};
+
+const exportAttendanceReport = async (req, res) => {
+  try {
+    if (!canExportHrAttendanceReport(req.user?.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo el perfil administrativo puede exportar el reporte de asistencia',
+      });
+    }
+
+    const dateFrom = parseIsoDate(req.query.from || req.query.date_from);
+    const dateTo = parseIsoDate(req.query.to || req.query.date_to);
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debes enviar from y to con formato YYYY-MM-DD',
+      });
+    }
+
+    if (dateFrom > dateTo) {
+      return res.status(400).json({
+        success: false,
+        message: 'La fecha inicial no puede ser mayor que la fecha final',
+      });
+    }
+
+    const employeeId = req.query.employee_id ? Number(req.query.employee_id) : null;
+    const projectId = req.query.project_id ? Number(req.query.project_id) : null;
+
+    const connection = await pool.getConnection();
+    await ensureAttendanceShape(connection);
+    await ensureOperationalScopeShape(connection);
+
+    const { where, params } = buildAttendanceFilters({
+      req,
+      employeeId: Number.isFinite(employeeId) ? employeeId : null,
+      projectId: Number.isFinite(projectId) ? projectId : null,
+      dateFrom,
+      dateTo,
+    });
+
+    const [rows] = await connection.execute(
+      `${ATTENDANCE_SELECT_FIELDS}
+       ${where}
+       ORDER BY a.attendance_date ASC, a.check_in ASC`,
+      params
+    );
+
+    connection.release();
+
+    res.json({
+      success: true,
+      message: 'Reporte de asistencia generado',
+      data: rows,
+      meta: {
+        from: dateFrom,
+        to: dateTo,
+        total: rows.length,
+        employeeId: Number.isFinite(employeeId) ? employeeId : null,
+        projectId: Number.isFinite(projectId) ? projectId : null,
+      },
+    });
+  } catch (error) {
+    console.error('exportAttendanceReport error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al exportar reporte de asistencia',
+      error: error.message,
+    });
   }
 };
 
@@ -256,7 +381,8 @@ const checkInAttendance = async (req, res) => {
         normalizedRole === 'administrative' ||
         normalizedRole === 'coordinator_operations' ||
         normalizedRole === 'leader' ||
-        normalizedRole === 'supervisor'
+        normalizedRole === 'supervisor' ||
+        normalizedRole === 'commercial'
       )
     );
 
@@ -309,7 +435,7 @@ const checkInAttendance = async (req, res) => {
       }
     }
 
-    if (normalizedRole === 'employee') {
+    if ((normalizedRole === 'employee' || normalizedRole === 'commercial') && employee_id) {
       const [ownedEmployee] = await connection.execute(
         'SELECT id FROM employees WHERE id = ? AND user_id = ? LIMIT 1',
         [employee_id, req.user.id]
@@ -413,7 +539,7 @@ const checkOutAttendance = async (req, res) => {
       }
     }
 
-    if (normalizedRole === 'administrative' || normalizedRole === 'coordinator_operations' || normalizedRole === 'gerencial') {
+    if (normalizedRole === 'administrative' || normalizedRole === 'coordinator_operations' || normalizedRole === 'gerencial' || normalizedRole === 'commercial') {
       if (ownerUserId !== Number(req.user.id)) {
         connection.release();
         return res.status(403).json({
@@ -474,7 +600,9 @@ const checkOutAttendance = async (req, res) => {
 module.exports = {
   getAttendance,
   getAttendanceById,
+  exportAttendanceReport,
   checkInAttendance,
   checkOutAttendance,
-  ensureAttendanceShape
+  ensureAttendanceShape,
+  canExportHrAttendanceReport,
 };

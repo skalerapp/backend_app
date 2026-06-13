@@ -1,6 +1,7 @@
 const request = require('supertest');
 const app = require('../src/server');
 const { closeDatabase } = require('../src/config/database');
+const { loginAs } = require('./helpers/testHelpers');
 
 let authToken;
 let employeeId;
@@ -91,6 +92,55 @@ describe('Attendance endpoints', () => {
       });
 
     expect(res.statusCode).toBe(200);
+  });
+
+  it('POST /api/attendance/check-in allows commercial user attendance without employee_id', async () => {
+    const commercialLogin = await loginAs({
+      authToken,
+      email: `commercial.attendance.${Date.now()}@skaler.com`,
+      password: '123456',
+      role: 'commercial',
+      name: `Commercial Attendance ${Date.now()}`,
+    });
+
+    const commercialDate = new Date(Date.now() + ((Date.now() % 1000) + 50) * 86400000)
+      .toISOString()
+      .slice(0, 10);
+
+    const res = await request(app)
+      .post('/api/attendance/check-in')
+      .set('Authorization', `Bearer ${commercialLogin.token}`)
+      .send({
+        location_latitude: 4.39482,
+        location_longitude: -75.13666,
+        photo_path: 'uploads/test-commercial-attendance.jpg',
+        attendance_date: commercialDate,
+      });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.success).toBe(true);
+    expect(res.body.attendanceId).toBeDefined();
+  });
+
+  it('GET /api/attendance/export/report requires date range', async () => {
+    const res = await request(app)
+      .get('/api/attendance/export/report')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/from y to/i);
+  });
+
+  it('GET /api/attendance/export/report returns rows for date range', async () => {
+    const res = await request(app)
+      .get(`/api/attendance/export/report?from=${testAttendanceDate}&to=${testAttendanceDate}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Array.isArray(res.body.data)).toBe(true);
+    expect(res.body.meta.from).toBe(testAttendanceDate);
+    expect(res.body.meta.to).toBe(testAttendanceDate);
   });
 
   afterAll(async () => {

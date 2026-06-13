@@ -291,6 +291,76 @@ const getAppSessionBridgeOverview = async ({ appSessionId }) => {
   }
 };
 
+const getWebLaunchTicketState = async ({ ticketCode }) => {
+  await ensureAuthSessionSchema();
+
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.execute(
+      `
+        SELECT
+          ticket.id,
+          ticket.ticket_status,
+          ticket.expires_at,
+          ticket.consumed_at,
+          app.session_status AS app_session_status,
+          app.last_seen_at AS app_last_seen_at,
+          app.expires_at AS app_expires_at
+        FROM auth_web_launch_tickets ticket
+        INNER JOIN auth_app_sessions app ON app.id = ticket.app_session_id
+        WHERE ticket.ticket_code = ?
+        LIMIT 1
+      `,
+      [ticketCode],
+    );
+
+    if (rows.length === 0) {
+      return { valid: false, reason: 'not_found', ticketStatus: null };
+    }
+
+    const ticket = rows[0];
+    const now = Date.now();
+    const ticketStatus = ticket.ticket_status;
+
+    if (ticketStatus === TICKET_STATUS_REVOKED) {
+      return { valid: false, reason: 'ticket_revoked', ticketStatus };
+    }
+
+    if (ticketStatus === TICKET_STATUS_CONSUMED) {
+      return { valid: false, reason: 'ticket_consumed', ticketStatus };
+    }
+
+    if (ticketStatus === TICKET_STATUS_EXPIRED) {
+      return { valid: false, reason: 'ticket_expired', ticketStatus };
+    }
+
+    if (ticketStatus !== TICKET_STATUS_PENDING) {
+      return { valid: false, reason: 'ticket_used_or_revoked', ticketStatus };
+    }
+
+    if (ticket.expires_at && new Date(ticket.expires_at).getTime() <= now) {
+      return { valid: false, reason: 'ticket_expired', ticketStatus };
+    }
+
+    if (ticket.app_session_status !== SESSION_STATUS_ACTIVE) {
+      return { valid: false, reason: 'app_session_revoked', ticketStatus };
+    }
+
+    if (ticket.app_expires_at && new Date(ticket.app_expires_at).getTime() <= now) {
+      return { valid: false, reason: 'app_session_expired', ticketStatus };
+    }
+
+    const appLastSeenAt = ticket.app_last_seen_at ? new Date(ticket.app_last_seen_at).getTime() : 0;
+    if (appLastSeenAt + heartbeatTtlMs() <= now) {
+      return { valid: false, reason: 'app_session_inactive', ticketStatus };
+    }
+
+    return { valid: true, reason: null, ticketStatus, expiresAt: ticket.expires_at || null };
+  } finally {
+    connection.release();
+  }
+};
+
 const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
   await ensureAuthSessionSchema();
 
@@ -322,6 +392,17 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
     const now = new Date();
     const ticketExpiry = ticket.expires_at ? new Date(ticket.expires_at) : null;
     const appExpiry = ticket.app_expires_at ? new Date(ticket.app_expires_at) : null;
+    const appLastSeenAt = ticket.app_last_seen_at ? new Date(ticket.app_last_seen_at).getTime() : 0;
+
+    if (ticket.ticket_status === TICKET_STATUS_REVOKED) {
+      await connection.rollback();
+      throw new Error('El enlace temporal fue revocado y ya no está disponible');
+    }
+
+    if (ticket.ticket_status === TICKET_STATUS_CONSUMED) {
+      await connection.rollback();
+      throw new Error('El enlace temporal ya fue usado');
+    }
 
     if (ticket.ticket_status && ticket.ticket_status !== TICKET_STATUS_PENDING) {
       await connection.rollback();
@@ -350,6 +431,25 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
       await connection.commit();
       throw new Error('La sesión móvil asociada ya expiró');
     }
+
+    if (appLastSeenAt + heartbeatTtlMs() <= now.getTime()) {
+      await connection.rollback();
+      throw new Error('La sesión móvil asociada ya no está activa');
+    }
+
+    await connection.execute(
+      `
+        UPDATE auth_web_sessions
+        SET session_status = ?, revoked_at = NOW(), revoked_reason = ?, updated_at = NOW()
+        WHERE app_session_id = ? AND session_status = ?
+      `,
+      [
+        SESSION_STATUS_REVOKED,
+        'Nueva sesión web iniciada con enlace temporal',
+        ticket.app_session_id,
+        SESSION_STATUS_ACTIVE,
+      ],
+    );
 
     const jwtSessionId = createId(24);
     const expiresAt = appExpiry && appExpiry.getTime() > now.getTime()
@@ -419,9 +519,9 @@ const revokeLinkedWebSessions = async ({ appSessionId, reason }) => {
       `
         UPDATE auth_web_launch_tickets
         SET ticket_status = ?, updated_at = NOW()
-        WHERE app_session_id = ? AND ticket_status = ?
+        WHERE app_session_id = ? AND ticket_status IN (?, ?)
       `,
-      [TICKET_STATUS_REVOKED, appSessionId, TICKET_STATUS_PENDING],
+      [TICKET_STATUS_REVOKED, appSessionId, TICKET_STATUS_PENDING, TICKET_STATUS_CONSUMED],
     );
   } finally {
     connection.release();
@@ -598,6 +698,7 @@ module.exports = {
   touchSession,
   getSessionState,
   getAppSessionBridgeOverview,
+  getWebLaunchTicketState,
   buildLaunchUrl,
   getWebAppUrl,
 };

@@ -18,6 +18,7 @@ const connectionConfig = {
 };
 
 const schemaPath = path.join(__dirname, '../../..', 'database', 'schema.sql');
+const adminOnly = process.argv.includes('--admin-only');
 
 const parseStatements = (sql) => {
   const sanitizedSql = sql
@@ -33,7 +34,6 @@ const parseStatements = (sql) => {
 
 const ensureBaseUsers = async (connection) => {
   const adminPassword = await hashPassword(process.env.DEFAULT_ADMIN_PASSWORD || 'admin123');
-  const commercialPassword = await hashPassword(process.env.COMMERCIAL_USER_PASSWORD || 'commercial123');
 
   await connection.execute(
     `INSERT INTO users (email, password, name, role, status, created_at)
@@ -47,22 +47,40 @@ const ensureBaseUsers = async (connection) => {
     ['admin@skaler.com', adminPassword, 'Admin', 'super_admin'],
   );
 
-  await connection.execute(
-    `INSERT INTO users (email, password, name, role, status, created_at)
-     VALUES (?, ?, ?, ?, 'active', NOW())
-     ON DUPLICATE KEY UPDATE
-       password = VALUES(password),
-       name = VALUES(name),
-       role = VALUES(role),
-       status = 'active',
-       updated_at = NOW()`,
-    [
-      process.env.COMMERCIAL_USER_EMAIL || 'commercial@skaler.com',
-      commercialPassword,
-      process.env.COMMERCIAL_USER_NAME || 'Asesor Comercial',
-      'commercial',
-    ],
+  if (!adminOnly) {
+    const commercialPassword = await hashPassword(process.env.COMMERCIAL_USER_PASSWORD || 'commercial123');
+    await connection.execute(
+      `INSERT INTO users (email, password, name, role, status, created_at)
+       VALUES (?, ?, ?, ?, 'active', NOW())
+       ON DUPLICATE KEY UPDATE
+         password = VALUES(password),
+         name = VALUES(name),
+         role = VALUES(role),
+         status = 'active',
+         updated_at = NOW()`,
+      [
+        process.env.COMMERCIAL_USER_EMAIL || 'commercial@skaler.com',
+        commercialPassword,
+        process.env.COMMERCIAL_USER_NAME || 'Asesor Comercial',
+        'commercial',
+      ],
+    );
+  }
+};
+
+const resetCounters = async (connection) => {
+  const [tables] = await connection.query(
+    `SELECT COUNT(*) AS total
+     FROM information_schema.tables
+     WHERE table_schema = DATABASE() AND table_name = 'counters'`
   );
+
+  if (Number(tables[0]?.total || 0) === 0) {
+    return;
+  }
+
+  await connection.query('DELETE FROM counters');
+  await connection.query("INSERT INTO counters (name, value) VALUES ('quotation', 0)");
 };
 
 const run = async () => {
@@ -102,6 +120,7 @@ const run = async () => {
     }
 
     await ensureCurrentSchema({ connection: dbConnection });
+    await resetCounters(dbConnection);
     await ensureBaseUsers(dbConnection);
 
     const [tableRows] = await dbConnection.query(
@@ -114,7 +133,12 @@ const run = async () => {
     console.log(`✅ Base de datos reconstruida: ${dbName}`);
     console.log(`✅ Tablas disponibles tras sincronización: ${tableRows.length}`);
     console.log('✅ Usuario admin listo: admin@skaler.com / admin123');
-    console.log(`✅ Usuario comercial listo: ${process.env.COMMERCIAL_USER_EMAIL || 'commercial@skaler.com'} / ${process.env.COMMERCIAL_USER_PASSWORD || 'commercial123'}`);
+    console.log('✅ Consecutivos reiniciados (counters.quotation = 0)');
+    if (!adminOnly) {
+      console.log(`✅ Usuario comercial listo: ${process.env.COMMERCIAL_USER_EMAIL || 'commercial@skaler.com'} / ${process.env.COMMERCIAL_USER_PASSWORD || 'commercial123'}`);
+    } else {
+      console.log('ℹ️ Modo admin-only: solo quedó admin@skaler.com');
+    }
   } catch (error) {
     console.error(`❌ Error reconstruyendo la base: ${error.message}`);
     process.exitCode = 1;

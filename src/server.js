@@ -22,6 +22,17 @@ const parseCorsOrigins = () => {
   return [...new Set(allowed)];
 };
 
+const normalizeOrigin = (origin) => origin.toString().trim().replace(/\/$/, '');
+
+const isLocalDevOrigin = (origin) => {
+  try {
+    const parsed = new URL(origin);
+    return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  } catch (_) {
+    return false;
+  }
+};
+
 const allowedOrigins = parseCorsOrigins();
 
 // Importar rutas
@@ -46,7 +57,16 @@ const app = express();
 // Middlewares
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin.replace(/\/$/, ''))) {
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    const normalizedOrigin = normalizeOrigin(origin);
+    if (
+      allowedOrigins.length === 0 ||
+      allowedOrigins.includes(normalizedOrigin) ||
+      isLocalDevOrigin(normalizedOrigin)
+    ) {
       return callback(null, true);
     }
     return callback(new Error('Origen no permitido por CORS'));

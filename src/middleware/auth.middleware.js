@@ -62,6 +62,51 @@ const normalizeRole = (roleValue) => {
   }
 };
 
+const resolveSessionType = (decoded) => (decoded.session_type === 'web' ? 'web' : 'app');
+
+const rejectLegacyToken = (res) => res.status(403).json({
+  success: false,
+  message: 'La sesión ya no es válida. Inicia sesión nuevamente.',
+  reason: 'legacy_session_unsupported',
+});
+
+// Middleware para consultar estado de sesión sin bloquear tokens revocados.
+const verifyTokenForSessionStatus = async (req, res, next) => {
+  const token = req.headers['authorization'];
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: 'Token no proporcionado',
+    });
+  }
+
+  const bearerToken = token.startsWith('Bearer ') ? token.slice(7) : token;
+
+  try {
+    const secret = process.env.JWT_SECRET || 'skaler_dev_secret';
+    const decoded = jwt.verify(bearerToken, secret);
+    req.user = decoded;
+
+    if (!decoded || !decoded.sid) {
+      req.sessionState = { valid: false, reason: 'legacy_session_unsupported' };
+      return next();
+    }
+
+    req.sessionState = await getSessionState({
+      jwtSessionId: decoded.sid,
+      sessionType: resolveSessionType(decoded),
+    });
+
+    return next();
+  } catch (err) {
+    return res.status(403).json({
+      success: false,
+      message: 'Token inválido o expirado',
+    });
+  }
+};
+
 // Middleware para verificar JWT
 const verifyToken = async (req, res, next) => {
   const token = req.headers['authorization'];
@@ -79,26 +124,28 @@ const verifyToken = async (req, res, next) => {
     const secret = process.env.JWT_SECRET || 'skaler_dev_secret';
     const decoded = jwt.verify(bearerToken, secret);
 
-    if (decoded && decoded.sid) {
-      const sessionType = decoded.session_type === 'web' ? 'web' : 'app';
-      const sessionState = await getSessionState({
-        jwtSessionId: decoded.sid,
-        sessionType,
-      });
+    if (!decoded || !decoded.sid) {
+      return rejectLegacyToken(res);
+    }
 
-      if (!sessionState.valid) {
-        return res.status(403).json({
-          success: false,
-          message: 'La sesión vinculada ya no está activa',
-          reason: sessionState.reason,
-        });
-      }
+    const sessionType = resolveSessionType(decoded);
+    const sessionState = await getSessionState({
+      jwtSessionId: decoded.sid,
+      sessionType,
+    });
 
-      await touchSession({
-        jwtSessionId: decoded.sid,
-        sessionType,
+    if (!sessionState.valid) {
+      return res.status(403).json({
+        success: false,
+        message: 'La sesión vinculada ya no está activa',
+        reason: sessionState.reason,
       });
     }
+
+    await touchSession({
+      jwtSessionId: decoded.sid,
+      sessionType,
+    });
 
     req.user = decoded;
     next();
@@ -164,6 +211,7 @@ const verifyModuleAccess = (moduleKey, action = 'read') => {
 
 module.exports = {
   verifyToken,
+  verifyTokenForSessionStatus,
   verifyRole,
   verifyModuleAccess,
   normalizeRole,

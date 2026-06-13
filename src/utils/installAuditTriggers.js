@@ -11,8 +11,8 @@ const auditedTables = [
   {
     tableName: 'projects',
     entityType: 'projects',
-    columns: ['id', 'name', 'description', 'budget', 'start_date', 'end_date', 'actual_end_date', 'manager_id', 'status', 'ot_code', 'created_at', 'updated_at'],
-    changedColumns: ['name', 'description', 'budget', 'start_date', 'end_date', 'actual_end_date', 'manager_id', 'status', 'ot_code'],
+    columns: ['id', 'name', 'description', 'budget', 'start_date', 'end_date', 'actual_end_date', 'manager_id', 'status', 'ot_code', 'planned_area_m2', 'planned_length_ml', 'created_at', 'updated_at'],
+    changedColumns: ['name', 'description', 'budget', 'start_date', 'end_date', 'actual_end_date', 'manager_id', 'status', 'ot_code', 'planned_area_m2', 'planned_length_ml'],
   },
   {
     tableName: 'employees',
@@ -23,8 +23,8 @@ const auditedTables = [
   {
     tableName: 'activities',
     entityType: 'activities',
-    columns: ['id', 'project_id', 'employee_id', 'title', 'description', 'date', 'activity_date', 'start_time', 'end_time', 'hours_worked', 'evidences', 'status', 'created_at', 'updated_at'],
-    changedColumns: ['project_id', 'employee_id', 'title', 'description', 'date', 'activity_date', 'start_time', 'end_time', 'hours_worked', 'evidences', 'status'],
+    columns: ['id', 'project_id', 'employee_id', 'title', 'description', 'date', 'activity_date', 'start_time', 'end_time', 'hours_worked', 'evidences', 'executed_area_m2', 'executed_length_ml', 'status', 'created_at', 'updated_at'],
+    changedColumns: ['project_id', 'employee_id', 'title', 'description', 'date', 'activity_date', 'start_time', 'end_time', 'hours_worked', 'evidences', 'executed_area_m2', 'executed_length_ml', 'status'],
   },
   {
     tableName: 'labor_permissions',

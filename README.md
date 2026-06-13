@@ -1,37 +1,42 @@
-# SKALER Backend - Configuración de Desarrollo
+# SKALER Backend
 
-## Instalación paso a paso
+API REST del sistema SKALER (gestión operativa, comercial, viáticos, materiales, almacén y auditoría).
+
+## Requisitos
+
+- Node.js 18+
+- MySQL 8+
+- npm
+
+## Inicio rápido
 
 ### 1. Instalar dependencias
+
 ```bash
 npm install
 ```
 
-### 2. Configurar ambiente
-Crear archivo `.env` en la raíz del backend:
+### 2. Configurar `.env`
+
+Copia `.env.example` a `.env` y ajusta credenciales:
 
 ```env
-# Servidor
 PORT=3000
 NODE_ENV=development
 API_URL=http://localhost:3000
 
-# Base de Datos
 DB_HOST=localhost
 DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=
 DB_NAME=skaler_db
 
-# JWT
 JWT_SECRET=your_super_secret_jwt_key_here_change_in_production
 JWT_EXPIRE=24h
 
-# Almacenamiento
 UPLOAD_DIR=./uploads
 MAX_FILE_SIZE=10485760
 
-# Aplicaciones
 FRONTEND_URL=http://localhost:8080
 DASHBOARD_URL=http://localhost:3001
 WEB_APP_URL=http://localhost:8080
@@ -40,314 +45,291 @@ WEB_SESSION_EXPIRE=12h
 APP_SESSION_HEARTBEAT_TTL=90s
 ```
 
-### 2.1. Configuración en Railway
+### 3. Crear / sincronizar base de datos
 
-Si vas a desplegar el backend en Railway, usa como referencia el archivo `.env.railway.example`.
+**Opción recomendada (local):** reconstruye la BD desde `database/schema.sql`, aplica el schema actual de todos los módulos e instala triggers de auditoría.
 
-Variables mínimas recomendadas en Railway:
+```bash
+# BD limpia + admin + usuario comercial por defecto
+npm run db:rebuild:local
 
-```env
-NODE_ENV=production
-PORT=3000
-API_URL=https://TU-BACKEND.railway.app
-DATABASE_URL=mysql://root:TU_PASSWORD@HOST:PUERTO/railway
-JWT_SECRET=un_secreto_largo_y_unico
-FRONTEND_URL=https://TU-FRONTEND.web.app
-WEB_APP_URL=https://TU-FRONTEND.web.app
-CORS_ORIGINS=https://TU-FRONTEND.web.app
-DB_SSL=true
+# BD limpia + solo admin@skaler.com (ideal para pruebas)
+npm run db:reset:admin-only
 ```
 
-Notas:
-- Si Railway ya inyecta `MYSQLHOST`, `MYSQLPORT`, `MYSQLUSER`, `MYSQLPASSWORD` y `MYSQLDATABASE`, no necesitas definir `DATABASE_URL`.
-- `CORS_ORIGINS` puede llevar varias URLs separadas por coma.
-- `WEB_APP_URL` es la URL pública que abrirá el acceso web temporal generado desde la app.
+Credenciales por defecto tras el rebuild:
 
-### 3. Crear base de datos
+| Usuario | Email | Contraseña |
+|---------|-------|------------|
+| Admin | `admin@skaler.com` | `admin123` |
+| Comercial *(solo `db:rebuild:local`)* | `commercial@skaler.com` | `commercial123` |
+
+El reset también reinicia consecutivos (`counters.quotation = 0`).
+
+**Opción manual (solo schema base):**
+
 ```bash
 mysql -u root -p < ../database/schema.sql
+npm run db:schema:sync
 ```
 
-En Railway, la base de datos ya puede cargarse importando `../database/schema.sql` contra la instancia MySQL remota.
+`db:schema:sync` crea/actualiza tablas de viáticos, comercial, almacén, alcances operativos y auditoría sin borrar datos existentes.
 
 ### 4. Ejecutar servidor
+
 ```bash
-# Desarrollo (con auto-reload)
+# Desarrollo (auto-reload)
 npm run dev
 
 # Producción
 npm start
 ```
 
-### 5. Despliegue externo con Railway
-
-Orden recomendado:
-
-1. Crear el servicio backend en Railway apuntando a la carpeta `backend/`.
-2. Cargar las variables de entorno de producción.
-3. Verificar que Railway detecte el comando `npm start`.
-4. Confirmar que el healthcheck responda en `/api/health`.
-5. Probar login desde la app Flutter usando la URL pública del backend.
-
-Importante:
-- Si el proyecto se despliega desde la raíz del repositorio, en Railway debes definir `Root Directory = backend`.
-- Si no configuras esa carpeta raíz, Railway intentará arrancar desde la raíz del proyecto y fallará porque ahí no existe `package.json` del backend.
-
-Ejemplo de healthcheck esperado:
+Healthcheck:
 
 ```text
-GET https://TU-BACKEND.railway.app/api/health
+GET http://localhost:3000/api/health
 => {"success":true,"message":"Backend funcionando"}
 ```
 
-### 5.1. Checklist de despliegue para viáticos comerciales
+## Scripts npm
 
-Usa esta lista cuando el cambio incluya permisos o flujo de viáticos para el rol `commercial`.
+| Script | Descripción |
+|--------|-------------|
+| `npm run dev` | Servidor con nodemon |
+| `npm start` | Servidor en producción |
+| `npm test` | Tests Jest (ejecuta en serie) |
+| `npm run db:rebuild:local` | Drop + recreate BD, schema sync, admin + comercial |
+| `npm run db:reset:admin-only` | Igual que rebuild, pero **solo** `admin@skaler.com` |
+| `npm run db:schema:sync` | Sincroniza tablas/columnas **sin borrar datos** (usar en prod cliente) |
+| `npm run db:schema:export` | Exporta schema actual a `database/schema.sql` |
+| `npm run db:schema:export` | Exporta schema actual a SQL |
+| `npm run db:seed:demo` | Carga datos demo operativos |
+| `npm run cleanup:test-data` | Elimina usuarios/proyectos de prueba detectados por patrón |
+| `npm run cleanup:test-data -- --apply` | Aplica la limpieza |
+| `npm run reset:auto-increment` | Preview de AUTO_INCREMENT por tabla |
+| `npm run reset:auto-increment -- --apply` | Ajusta AUTO_INCREMENT según MAX(id) |
+| `npm run migrate:audit:triggers` | Instala triggers de auditoría |
+| `npm run verify:audit:triggers` | Verifica triggers instalados |
+| `npm run migrate:users:roles:v1` | Normaliza roles legacy en `users.role` |
+| `npm run migrate:users:super-admin` | Promueve usuario admin a `super_admin` |
+| `npm run assign:users:role` | Asigna rol a usuarios por email |
+| `npm run import:warehouse:assets` | Importa activos de almacén desde CSV |
 
-1. Confirmar que Railway despliega desde `backend/`.
-2. Verificar que las variables `JWT_SECRET`, `CORS_ORIGINS`, `FRONTEND_URL` y `WEB_APP_URL` correspondan al entorno productivo actual.
-3. Ejecutar redeploy del servicio backend después de subir cambios en:
-  - `src/config/moduleAccessPolicy.js`
-  - `src/modules/allowances/allowances.routes.js`
-  - `src/modules/allowances/allowances.controller.js`
-4. Confirmar healthcheck `GET /api/health` en la URL pública de Railway.
-5. Probar login desde la app Flutter apuntando a la URL Railway.
-6. Validar con usuario `commercial`:
-  - Puede abrir viáticos sin error.
-  - Puede crear solicitud de viáticos.
-  - Puede ver seguimiento de su solicitud.
-7. Validar con usuario `administrative` o `gerencial`:
-  - Puede abrir solicitudes pendientes.
-  - Puede aprobar o rechazar la solicitud del comercial.
-8. Validar nuevamente con usuario `commercial`:
-  - Ve la solicitud aprobada o rechazada en seguimiento.
-  - Si queda aprobada, puede abrir la bolsa y registrar gasto.
+### Limpieza de datos de prueba
 
-Si alguno de estos pasos falla en Railway pero funciona local, revisar primero que el despliegue activo corresponda al último commit y que no exista una instancia antigua apuntando a otra rama o a otra carpeta raíz.
+- **`db:reset:admin-only`**: borra **toda** la base y deja solo el admin. Usar cuando quieras empezar de cero.
+- **`cleanup:test-data`**: borra selectivamente registros que coinciden con patrones de test (RBAC, demo, prueba). No toca `admin@skaler.com`.
 
-## Estructura de directorios
+## Módulos y rutas API
+
+| Prefijo | Módulo |
+|---------|--------|
+| `/api/auth` | Autenticación, sesiones web |
+| `/api/users` | Usuarios y roles |
+| `/api/employees` | Empleados |
+| `/api/projects` | Proyectos |
+| `/api/activities` | Actividades |
+| `/api/attendance` | Asistencia |
+| `/api/labor-permissions` | Permisos laborales |
+| `/api/allowances` | Viáticos, solicitudes y gastos |
+| `/api/materials` | Materiales por proyecto |
+| `/api/warehouse` | Almacén / activos |
+| `/api/operational-scopes` | Alcances operativos por rol |
+| `/api/commercial` | Comercial V2 (clientes, visitas, embudo, cotizaciones) |
+| `/api/evidence` | Carga de evidencias |
+| `/api/audit-logs` | Auditoría |
+
+### Comercial — reglas clave
+
+- **Cliente comercial** = sede identificada por **NIT + ciudad** (mismo NIT puede repetirse en otra ciudad).
+- **Clientes**: `GET/POST /api/commercial/clients`, `PUT /api/commercial/clients/:id`, búsqueda con `?q=`.
+- **Cotizaciones**: consecutivo en tabla `counters` (`quotation`).
+- Permisos por rol en `src/config/moduleAccessPolicy.js`.
+
+## Estructura del proyecto
 
 ```
 backend/
 ├── src/
-│   ├── modules/           # Módulos funcionales
-│   │   ├── auth/
-│   │   │   ├── auth.routes.js
-│   │   │   └── auth.controller.js
-│   │   ├── admin/
-│   │   ├── projects/
-│   │   ├── operative/
-│   │   ├── warehouse/
-│   │   ├── commercial/
-│   │   ├── hse/
-│   │   └── dashboard/
-│   ├── middleware/        # Middlewares globales
+│   ├── server.js              # Entrada Express + CORS + rutas
+│   ├── config/
+│   │   ├── database.js        # Pool MySQL
+│   │   └── moduleAccessPolicy.js
+│   ├── middleware/
 │   │   └── auth.middleware.js
-│   ├── utils/            # Funciones auxiliares
-│   │   └── auth.utils.js
-│   ├── config/           # Configuración
-│   │   └── database.js
-│   └── server.js         # Servidor principal
-├── uploads/              # Archivos subidos
+│   ├── modules/
+│   │   ├── auth/
+│   │   ├── users/
+│   │   ├── employees/
+│   │   ├── projects/
+│   │   ├── activities/
+│   │   ├── attendance/
+│   │   ├── laborPermissions/
+│   │   ├── allowances/
+│   │   ├── materials/
+│   │   ├── warehouse/
+│   │   ├── operationalScopes/
+│   │   ├── commercial/
+│   │   ├── evidence/
+│   │   └── audit/
+│   └── utils/                 # Migraciones, seeds, rebuild BD
+├── test/                      # Tests Jest + Supertest
+├── migrations/                # SQL sueltos (comercial, counters)
+├── uploads/                   # Archivos subidos
 ├── package.json
-├── .env                  # Variables de entorno (NO INCLUIR EN GIT)
-├── .env.example         # Plantilla de .env
+├── .env.example
 └── README.md
 ```
 
-## Desarrollo de nuevos módulos
-
-Cada módulo debe tener:
-- `MODULE.routes.js` - Definición de rutas
-- `MODULE.controller.js` - Lógica de negocio
-- `MODULE.model.js` (opcional) - Consultas a BD
-
-### Ejemplo de módulo
-
-1. Crear archivos:
-```bash
-mkdir -p src/modules/nuevo_modulo
-touch src/modules/nuevo_modulo/{nuevo_modulo.routes.js,nuevo_modulo.controller.js}
-```
-
-2. Implementar routes:
-```javascript
-const express = require('express');
-const router = express.Router();
-const controller = require('./nuevo_modulo.controller');
-const { verifyToken } = require('../../middleware/auth.middleware');
-
-router.get('/', verifyToken, controller.getAll);
-router.post('/', verifyToken, controller.create);
-router.put('/:id', verifyToken, controller.update);
-router.delete('/:id', verifyToken, controller.delete);
-
-module.exports = router;
-```
-
-3. Registrar en server.js:
-```javascript
-const nuevoModuloRoutes = require('./modules/nuevo_modulo/nuevo_modulo.routes');
-app.use('/api/nuevo-modulo', nuevoModuloRoutes);
-```
+Cada módulo suele tener `*.routes.js` + `*.controller.js`. El schema evolutivo vive en funciones `ensure*Schema` de cada controlador y se centraliza en `syncCurrentSchema.js`.
 
 ## Testing
 
 ```bash
-# Ejecutar todos los tests
+# Todos los tests
 npm test
 
-# Tests con cobertura
+# Un archivo
+npm test -- test/commercial.test.js
+
+# Cobertura
 npm test -- --coverage
-
-# Tests en modo observación
-npm test -- --watch
 ```
 
-## Migración opcional (asistencia)
+Los tests asumen `admin@skaler.com` / `admin123` y base de datos de prueba configurada en el entorno de Jest.
 
-Si deseas eliminar definitivamente la columna `status` de `attendance` (flujo basado solo en entrada/salida):
+## Despliegue en Railway
 
-```bash
-npm run migrate:attendance:drop-status
+Repositorio GitHub: **`Jhonatan-soto/backend_skaler`** (el backend está en la **raíz** del repo, no en una carpeta `backend/`).
+
+### 1. Root Directory (causa habitual del error `Cannot find module /app/src/server.js`)
+
+En Railway → servicio **backend_app** → **Settings** → **Root Directory**:
+
+| Tipo de repo | Root Directory |
+|--------------|----------------|
+| Repo solo-backend (`backend_skaler`) | **vacío** o `/` |
+| Monorepo Skaler completo | `backend` |
+
+Si pones `backend` en un repo que ya es solo-backend, Railway busca `/app/backend/src/server.js` y el deploy falla en el healthcheck.
+
+### 2. Variables de entorno (servicio backend)
+
+En **Variables**, vincula el servicio MySQL **o** pega:
+
+```env
+NODE_ENV=production
+PORT=3000
+API_URL=https://TU-DOMINIO-PUBLICO.up.railway.app
+JWT_SECRET=<secreto-largo-unico>
+DB_SSL=true
+DATABASE_URL=mysql://root:PASSWORD@HOST:PUERTO/railway
 ```
 
-## Reparación histórica (actividades)
+Genera `JWT_SECRET` (PowerShell):
 
-Si deseas completar columnas legacy de `activities` (`title`, `date`, `activity_date`, `start_time`, `end_time`, `hours_worked`, `evidences`) para registros antiguos:
-
-```bash
-npm run migrate:activities:backfill-legacy
+```powershell
+[Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Maximum 256 }))
 ```
 
-## Migración V1 de roles de usuarios
+Referencia: `.env.client.railway.example`
 
-Estandariza valores legacy en `users.role` (por ejemplo `admin`, `manager`, `lider`, `empleado`) hacia la taxonomía oficial:
+### 3. Dominio público
 
-- `administrative`
-- `coordinator_operations`
-- `supervisor`
-- `leader`
-- `employee`
-- `gerencial`
+Railway → **backend_app** → **Settings** → **Networking** → **Generate Domain**.  
+Copia esa URL (ej. `https://backend-app-production-xxxx.up.railway.app`) y úsala en `API_URL` y en la app Flutter.
 
-Primero ejecuta en modo simulación (sin cambios):
+### 4. Sincronizar schema en MySQL Railway (una vez)
 
-```bash
-npm run migrate:users:roles:v1
+Desde tu PC (no commitees el `.env` con la URL):
+
+```powershell
+cd backend
+# Crea .env.client.sync con DATABASE_URL=... (ver .env.client.sync.example)
+.\scripts\sync-schema-production.ps1 -EnvFile .env.client.sync -SkipBackupReminder
 ```
 
-Para aplicar cambios reales:
+### 5. Verificar
 
-```bash
-npm run migrate:users:roles:v1 -- --apply
+```powershell
+Invoke-RestMethod https://TU-DOMINIO.up.railway.app/api/health
 ```
 
-Notas:
-- El script es idempotente.
-- Los roles no reconocidos como oficiales quedan sin cambio y se listan para revisión manual.
+### 6. App Flutter apuntando a Railway
 
-## Dependencias principales
+Debug:
 
-| Paquete | Versión | Uso |
-|---------|---------|-----|
-| express | ^4.18 | Framework web |
-| cors | ^2.8 | CORS |
-| dotenv | ^16.0 | Variables de entorno |
-| bcryptjs | ^2.4 | Hash de contraseñas |
-| jsonwebtoken | ^9.0 | JWT |
-| mysql2 | ^3.2 | Driver MySQL |
-| multer | ^1.4 | Subida de archivos |
-| morgan | ^1.10 | Logging HTTP |
+```powershell
+cd frontend\flutter
+flutter run --dart-define=API_BASE_URL=https://TU-DOMINIO.up.railway.app/api
+```
 
-## API Response Format
+APK release:
 
-Todas las respuestas seguirán este formato:
+```powershell
+.\scripts\build_client_release.ps1 -ApiBaseUrl "https://TU-DOMINIO.up.railway.app/api"
+```
 
-**Éxito (200, 201)**
+**No usar** `db:reset:admin-only` en producción — borra usuarios.
+
+## Formato de respuestas
+
+**Éxito**
+
 ```json
 {
   "success": true,
   "message": "Operación exitosa",
-  "data": { /* datos */ }
+  "data": {}
 }
 ```
 
-**Error (400, 401, 403, 500)**
+**Error**
+
 ```json
 {
   "success": false,
   "message": "Descripción del error",
-  "error": "Detalles técnicos (solo en desarrollo)"
+  "error": "Detalle técnico (solo en development)"
 }
 ```
 
-## Códigos HTTP
-
-| Código | Significado |
-|--------|------------|
-| 200 | OK - Operación exitosa |
-| 201 | Created - Recurso creado |
-| 400 | Bad Request - Datos inválidos |
-| 401 | Unauthorized - No autenticado |
-| 403 | Forbidden - No autorizado |
-| 404 | Not Found - Recurso no existe |
-| 500 | Server Error - Error interno |
-
 ## Seguridad
 
-- ✅ Todas las contraseñas hasheadas con bcrypt
-- ✅ JWT para autenticación stateless
-- ✅ CORS configurado
-- ✅ Validación de entrada en todos los endpoints
-- ✅ Rate limiting (implementar si es necesario)
+- Contraseñas con bcrypt
+- JWT stateless
+- CORS configurable (`CORS_ORIGINS`, `FRONTEND_URL`, `WEB_APP_URL`)
+- Validación en rutas sensibles
+- Auditoría vía triggers MySQL (`audit_logs`)
 
-## Debugging
+## Migraciones puntuales
 
-Habilitar logs detallados:
 ```bash
-DEBUG=skaler:* npm run dev
+# Eliminar columna legacy attendance.status
+npm run migrate:attendance:drop-status
+
+# Backfill columnas legacy en activities
+npm run migrate:activities:backfill-legacy
+
+# Roles legacy → taxonomía V1 (simulación)
+npm run migrate:users:roles:v1
+npm run migrate:users:roles:v1 -- --apply
 ```
 
-## Deployment
+## Dependencias principales
 
-### En producción
-
-1. Cambiar `.env`:
-```env
-NODE_ENV=production
-JWT_SECRET=STRONG_SECRET_HERE
-DB_PASSWORD=SECURE_PASSWORD
-```
-
-2. Instalar dependencias de producción:
-```bash
-npm install --production
-```
-
-3. Iniciar con PM2:
-```bash
-npm install -g pm2
-pm2 start src/server.js --name "skaler-api"
-pm2 startup
-pm2 save
-```
-
-## Monitoreo
-
-Se recomienda usar:
-- **PM2** para gestión de procesos
-- **Sentry** para tracking de errores
-- **DataDog** o **New Relic** para monitoreo
-
-## Recursos útiles
-
-- [Express.js Documentation](https://expressjs.com)
-- [MySQL2 Docs](https://github.com/sidorares/node-mysql2)
-- [JWT Best Practices](https://tools.ietf.org/html/rfc7519)
-- [OWASP API Security](https://owasp.org/www-project-api-security/)
+| Paquete | Uso |
+|---------|-----|
+| express | API HTTP |
+| mysql2 | MySQL |
+| jsonwebtoken | Auth JWT |
+| bcryptjs | Hash contraseñas |
+| multer | Uploads |
+| express-validator | Validación |
+| cors / morgan / dotenv | Infra |
 
 ---
 
-**Última actualización**: Marzo 2026  
-**Equipo**: JMS Tech
+**Última actualización:** Junio 2026  
+**Equipo:** JMS Tech

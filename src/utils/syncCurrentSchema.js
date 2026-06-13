@@ -15,16 +15,47 @@ const { ensureOperationalScopeShape } = require('../modules/operationalScopes/op
 const { ensureCommercialSchema } = require('../modules/commercial/commercial.controller');
 const { ensureWarehouseShape } = require('../modules/warehouse/warehouse.service');
 const { installAuditTriggers } = require('./installAuditTriggers');
+const { ensureAuthSessionSchema } = require('../modules/auth/auth.session.service');
 
-const dbName = process.env.DB_NAME || 'skaler_db';
-
-const connectionConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: dbName,
+const parseBoolean = (value, fallback = false) => {
+  if (value == null) return fallback;
+  const normalized = value.toString().trim().toLowerCase();
+  if (!normalized) return fallback;
+  return !['0', 'false', 'no', 'off'].includes(normalized);
 };
+
+const resolveConnectionConfig = () => {
+  const connectionString =
+    process.env.DATABASE_URL ||
+    process.env.MYSQL_URL ||
+    process.env.MYSQL_PUBLIC_URL ||
+    '';
+
+  if (connectionString.trim().length > 0) {
+    return { uri: connectionString.trim() };
+  }
+
+  return {
+    host: process.env.DB_HOST || process.env.MYSQLHOST || 'localhost',
+    port: Number(process.env.DB_PORT || process.env.MYSQLPORT || 3306),
+    user: process.env.DB_USER || process.env.MYSQLUSER || 'root',
+    password: process.env.DB_PASSWORD || process.env.MYSQLPASSWORD || '',
+    database: process.env.DB_NAME || process.env.MYSQLDATABASE || 'skaler_db',
+    ssl: parseBoolean(process.env.DB_SSL || process.env.MYSQL_SSL || process.env.MYSQL_SSL_REQUIRED, false)
+      ? { rejectUnauthorized: false }
+      : undefined,
+  };
+};
+
+const createSchemaConnection = async () => {
+  const config = resolveConnectionConfig();
+  if (config.uri) {
+    return mysql.createConnection(config.uri);
+  }
+  return mysql.createConnection(config);
+};
+
+const dbName = process.env.DB_NAME || process.env.MYSQLDATABASE || 'skaler_db';
 
 const listCurrentTables = async (connection) => {
   const [rows] = await connection.query(
@@ -48,7 +79,7 @@ const ensureCurrentSchema = async ({ connection: providedConnection, installAudi
 
   try {
     if (!connection) {
-      connection = await mysql.createConnection(connectionConfig);
+      connection = await createSchemaConnection();
       ownsConnection = true;
     }
 
@@ -64,6 +95,7 @@ const ensureCurrentSchema = async ({ connection: providedConnection, installAudi
     await runStep('Creando materiales', async () => ensureMaterialsShape(connection));
     await runStep('Creando comercial', async () => ensureCommercialSchema(connection));
     await runStep('Creando almacen', async () => ensureWarehouseShape(connection));
+    await runStep('Creando sesiones auth app/web', async () => ensureAuthSessionSchema());
 
     if (installAudit) {
       await runStep('Instalando auditoria', async () => installAuditTriggers({ connection }));

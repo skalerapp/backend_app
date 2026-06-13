@@ -1,6 +1,4 @@
-const request = require('supertest');
-const app = require('../src/server');
-const { closeDatabase } = require('../src/config/database');
+const { request, app, closeDatabase, loginAs } = require('./helpers/testHelpers');
 
 let authToken;
 let administrativeToken;
@@ -256,6 +254,7 @@ describe('Allowances endpoints', () => {
     expect(coordinatorRes.statusCode).toBe(201);
 
     const commercialLogin = await loginAs({
+      authToken,
       email: `commercial.allowance.${Date.now()}@skaler.com`,
       password: '123456',
       role: 'commercial',
@@ -335,6 +334,7 @@ describe('Allowances endpoints', () => {
     const secondRequestId = requestResForGerencial.body.data.id;
 
     const gerencialLogin = await loginAs({
+      authToken,
       email: `gerencial.allowance.${Date.now()}@skaler.com`,
       password: '123456',
       role: 'gerencial',
@@ -349,6 +349,66 @@ describe('Allowances endpoints', () => {
     expect(gerencialDecisionRes.statusCode).toBe(200);
     expect(gerencialDecisionRes.body.data.status).toBe('approved');
     expect(gerencialDecisionRes.body.data.approver_name).toBeDefined();
+  });
+
+  it('creates commercial bolsa when approving a visit request without project_id', async () => {
+    const commercialLogin = await loginAs({
+      authToken,
+      email: `commercial.allowance.${Date.now()}@skaler.com`,
+      password: 'Pass1234!',
+      role: 'commercial',
+      name: `Commercial Allowance ${Date.now()}`,
+    });
+
+    const requestRes = await request(app)
+      .post('/api/allowances/requests')
+      .set('Authorization', `Bearer ${commercialLogin.token}`)
+      .send({
+        city: 'Palmira',
+        client_name: 'Cliente Demo',
+        departure_date: '2026-06-12',
+        return_date: '2026-06-12',
+        budget_transport: 150000,
+        notes: 'Visita comercial sin proyecto',
+      });
+
+    expect(requestRes.statusCode).toBe(201);
+    expect(requestRes.body.data.project_id).toBeNull();
+
+    const requestId = requestRes.body.data.id;
+
+    const approvalRes = await request(app)
+      .patch(`/api/allowances/requests/${requestId}/status`)
+      .set('Authorization', `Bearer ${administrativeToken}`)
+      .send({ status: 'approved', decision_notes: 'Aprobada para visita comercial' });
+
+    expect(approvalRes.statusCode).toBe(200);
+    expect(approvalRes.body.data.status).toBe('approved');
+    expect(approvalRes.body.data.project_id).toBeTruthy();
+    expect(approvalRes.body.data.applied_to_allowance_at).toBeTruthy();
+
+    const allowancesRes = await request(app)
+      .get('/api/allowances')
+      .set('Authorization', `Bearer ${commercialLogin.token}`);
+
+    expect(allowancesRes.statusCode).toBe(200);
+    expect(allowancesRes.body.data.length).toBeGreaterThan(0);
+    expect(
+      allowancesRes.body.data.some((item) => Number(item.project_id) === Number(approvalRes.body.data.project_id))
+    ).toBe(true);
+
+    const expenseRes = await request(app)
+      .post(`/api/allowances/project/${approvalRes.body.data.project_id}/expenses`)
+      .set('Authorization', `Bearer ${commercialLogin.token}`)
+      .send({
+        amount: 25000,
+        expense_date: '2026-06-12',
+        notes: 'Gasto de prueba comercial',
+        allowance_request_id: requestId,
+      });
+
+    expect(expenseRes.statusCode).toBe(201);
+    expect(expenseRes.body.success).toBe(true);
   });
 
   afterAll(async () => {

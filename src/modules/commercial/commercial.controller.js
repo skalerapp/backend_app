@@ -1,5 +1,6 @@
 const db = require('../../config/database');
 const { applyAuditContext } = require('../../utils/auditContext');
+const { normalizeRole } = require('../../middleware/auth.middleware');
 
 const pool = db.pool;
 
@@ -61,11 +62,22 @@ const DEFAULT_COMMERCIAL_FORM_TEMPLATES = [
   },
 ];
 
+const INTERNAL_LOCATION_ROLES = new Set(['super_admin', 'administrative', 'gerencial']);
+
+const canViewInternalLocation = (roleValue) => INTERNAL_LOCATION_ROLES.has(normalizeRole(roleValue));
+
 const COMMERCIAL_VISIT_SELECT = `SELECT
   cv.id,
+  cv.client_id,
   cv.client_name,
   cv.client_contact,
   cv.visit_date,
+  cv.city,
+  cv.service_scope,
+  cv.site_conditions,
+  cv.access_types,
+  cv.delivery_time_estimate,
+  cv.will_generate_quotation,
   cv.latitude,
   cv.longitude,
   cv.form_type,
@@ -78,14 +90,27 @@ const COMMERCIAL_VISIT_SELECT = `SELECT
   cv.expense_amount,
   cv.status,
   cv.project_id,
+  cv.commercial_id,
   cv.created_by,
   cv.created_at,
   cv.updated_at,
   p.name AS project_name,
-  u.name AS created_by_name
+  u.name AS created_by_name,
+  vl.lat AS audit_lat,
+  vl.lng AS audit_lng,
+  vl.recorded_at AS audit_recorded_at
 FROM commercial_visits cv
 LEFT JOIN projects p ON cv.project_id = p.id
-LEFT JOIN users u ON cv.created_by = u.id`;
+LEFT JOIN users u ON cv.created_by = u.id
+LEFT JOIN (
+  SELECT vl1.visit_id, vl1.lat, vl1.lng, vl1.recorded_at
+  FROM visit_locations vl1
+  INNER JOIN (
+    SELECT visit_id, MAX(id) AS max_id
+    FROM visit_locations
+    GROUP BY visit_id
+  ) latest ON latest.max_id = vl1.id
+) vl ON vl.visit_id = cv.id`;
 
 const COMMERCIAL_OPPORTUNITY_SELECT = `SELECT
   co.id,
@@ -457,12 +482,34 @@ const upsertOpportunityFromVisit = async ({ connection, req, visit }) => {
   };
 };
 
-const mapVisitRow = (row) => ({
-  ...row,
-  visit_date: normalizeDate(row.visit_date),
-  next_action_date: normalizeDate(row.next_action_date),
-  form_payload: parseFormPayload(row.form_payload),
-});
+const mapVisitRow = (row, req = null) => {
+  const mapped = {
+    ...row,
+    visit_date: normalizeDate(row.visit_date),
+    next_action_date: normalizeDate(row.next_action_date),
+    form_payload: parseFormPayload(row.form_payload),
+    will_generate_quotation: row.will_generate_quotation === undefined
+      ? undefined
+      : !!Number(row.will_generate_quotation),
+  };
+
+  const showInternalLocation = req ? canViewInternalLocation(req.user?.role) : false;
+  if (showInternalLocation && row.audit_lat != null && row.audit_lng != null) {
+    mapped.audit_location = {
+      latitude: Number(row.audit_lat),
+      longitude: Number(row.audit_lng),
+      recorded_at: row.audit_recorded_at,
+    };
+  }
+
+  delete mapped.audit_lat;
+  delete mapped.audit_lng;
+  delete mapped.audit_recorded_at;
+  delete mapped.latitude;
+  delete mapped.longitude;
+
+  return mapped;
+};
 
 const mapOpportunityRow = (row) => ({
   ...row,
@@ -470,6 +517,151 @@ const mapOpportunityRow = (row) => ({
   last_activity_date: normalizeDate(row.last_activity_date),
   source_visit_date: normalizeDate(row.source_visit_date),
 });
+
+const mapQuotationRow = (row) => ({
+  ...row,
+  created_at: row.created_at,
+  updated_at: row.updated_at,
+});
+
+const listQuotations = async (req, res) => {
+  let connection;
+  try {
+    const projectId = req.query.project_id ? Number(req.query.project_id) : null;
+    const visitId = req.query.visit_id ? Number(req.query.visit_id) : null;
+    const searchQuery = req.query.query?.toString().trim();
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+
+    let sql = `
+      SELECT cq.*, ot.ot_code
+      FROM commercial_quotations cq
+      LEFT JOIN orders_ot ot ON ot.id = (
+        SELECT MAX(id) FROM orders_ot WHERE quotation_id = cq.id
+      )
+    `;
+    const conditions = [];
+    const params = [];
+
+    if (projectId != null) {
+      conditions.push('cq.project_id = ?');
+      params.push(projectId);
+    }
+    if (visitId != null) {
+      conditions.push('cq.visit_id = ?');
+      params.push(visitId);
+    }
+    if (searchQuery != null && searchQuery.length > 0) {
+      conditions.push('cq.quotation_number LIKE ?');
+      params.push(`%${searchQuery}%`);
+    }
+
+    if (conditions.length > 0) {
+      sql += `WHERE ${conditions.join(' AND ')}\n`;
+    }
+
+    sql += 'ORDER BY cq.created_at DESC\nLIMIT 200';
+
+    const [rows] = await connection.execute(sql, params);
+    res.json({ success: true, data: rows.map(mapQuotationRow) });
+  } catch (error) {
+    console.error('listQuotations error:', error);
+    res.status(500).json({ success: false, message: 'Error al listar cotizaciones', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const getQuotationById = async (req, res) => {
+  let connection;
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ success: false, message: 'Id invalido' });
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+    const [rows] = await connection.execute(`
+      SELECT cq.*, ot.ot_code
+      FROM commercial_quotations cq
+      LEFT JOIN orders_ot ot ON ot.id = (
+        SELECT MAX(id) FROM orders_ot WHERE quotation_id = cq.id
+      )
+      WHERE cq.id = ?
+      LIMIT 1
+    `, [id]);
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    res.json({ success: true, data: mapQuotationRow(rows[0]) });
+  } catch (error) {
+    console.error('getQuotationById error:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener cotización', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const approveQuotation = async (req, res) => {
+  let connection;
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ success: false, message: 'Id invalido' });
+    const payload = req.body || {};
+    const approvedValue = payload.approved_value ? Number(payload.approved_value) : null;
+
+    // permission: only gerencial/administrative/super_admin
+    if (!canViewInternalLocation(req.user?.role)) {
+      return res.status(403).json({ success: false, message: 'No autorizado para aprobar cotizaciones' });
+    }
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute('SELECT * FROM commercial_quotations WHERE id = ? LIMIT 1 FOR UPDATE', [id]);
+    if (!rows.length) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    }
+    const quotation = rows[0];
+    if (quotation.status === 'aprobado') {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Cotización ya aprobada' });
+    }
+
+    await connection.execute(
+      'UPDATE commercial_quotations SET status = ?, approved_value = ?, approval_date = NOW(), updated_at = NOW() WHERE id = ?',
+      ['aprobado', approvedValue, id]
+    );
+
+    // Optionally create OT row
+    if (payload.create_ot) {
+      const otCode = payload.ot_code || `OT-${id}-${Date.now()}`;
+      const [otResult] = await connection.execute(
+        'INSERT INTO orders_ot (ot_code, quotation_id, assigned_by, assigned_at) VALUES (?, ?, ?, NOW())',
+        [otCode, id, req.user?.id ?? null]
+      );
+    }
+
+    await applyAuditContext(connection, req);
+    await connection.commit();
+
+    const [updatedRows] = await connection.execute(`
+      SELECT cq.*, ot.ot_code
+      FROM commercial_quotations cq
+      LEFT JOIN orders_ot ot ON ot.id = (
+        SELECT MAX(id) FROM orders_ot WHERE quotation_id = cq.id
+      )
+      WHERE cq.id = ?
+      LIMIT 1
+    `, [id]);
+    res.json({ success: true, message: 'Cotización aprobada', data: mapQuotationRow(updatedRows[0]) });
+  } catch (error) {
+    console.error('approveQuotation error:', error);
+    try { await connection?.rollback(); } catch (_) {}
+    res.status(500).json({ success: false, message: 'Error al aprobar cotización', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
 
 const mapCommercialTemplateRow = (row) => ({
   id: row.id,
@@ -545,6 +737,14 @@ const ensureCommercialVisitsTable = async (connection) => {
   await ensureColumn(connection, 'commercial_visits', 'project_id', 'INT NULL AFTER status');
   await ensureColumn(connection, 'commercial_visits', 'created_by', 'INT NULL AFTER project_id');
   await ensureColumn(connection, 'commercial_visits', 'updated_at', 'TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at');
+  await ensureColumn(connection, 'commercial_visits', 'client_id', 'INT NULL AFTER id');
+  await ensureColumn(connection, 'commercial_visits', 'city', 'VARCHAR(120) NULL AFTER visit_date');
+  await ensureColumn(connection, 'commercial_visits', 'service_scope', 'TEXT NULL AFTER city');
+  await ensureColumn(connection, 'commercial_visits', 'site_conditions', 'TEXT NULL AFTER service_scope');
+  await ensureColumn(connection, 'commercial_visits', 'access_types', 'VARCHAR(255) NULL AFTER site_conditions');
+  await ensureColumn(connection, 'commercial_visits', 'delivery_time_estimate', 'VARCHAR(128) NULL AFTER access_types');
+  await ensureColumn(connection, 'commercial_visits', 'will_generate_quotation', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER delivery_time_estimate');
+  await ensureColumn(connection, 'commercial_visits', 'commercial_id', 'INT NULL AFTER will_generate_quotation');
 
   if (await hasColumn(connection, 'commercial_visits', 'client_phone')) {
     await connection.execute(`
@@ -689,10 +889,473 @@ const ensureCommercialFormTemplatesTable = async (connection) => {
   }
 };
 
+const normalizeClientCity = (value) => (value == null ? '' : value.toString().trim());
+
+const migrateCommercialClientsUniqueKey = async (connection) => {
+  const [indexes] = await connection.execute('SHOW INDEX FROM commercial_clients');
+  const indexNames = new Set(indexes.map((row) => row.Key_name));
+  if (indexNames.has('uk_commercial_clients_nit') && !indexNames.has('uk_commercial_clients_nit_city')) {
+    await connection.execute('ALTER TABLE commercial_clients DROP INDEX uk_commercial_clients_nit');
+  }
+  if (!indexNames.has('uk_commercial_clients_nit_city')) {
+    await connection.execute(
+      'ALTER TABLE commercial_clients ADD UNIQUE KEY uk_commercial_clients_nit_city (nit, city)',
+    );
+  }
+};
+
+const ensureCommercialClientsTable = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS commercial_clients (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      client_type ENUM('juridica', 'natural') NOT NULL,
+      nit VARCHAR(80) NOT NULL,
+      business_name VARCHAR(255) NOT NULL,
+      city VARCHAR(120) NOT NULL,
+      billing_email VARCHAR(255) NULL,
+      contact_name VARCHAR(150) NULL,
+      contact_phone VARCHAR(50) NULL,
+      areas JSON NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_commercial_clients_nit_city (nit, city),
+      INDEX idx_commercial_clients_name (business_name),
+      INDEX idx_commercial_clients_nit (nit)
+    )
+  `);
+  await migrateCommercialClientsUniqueKey(connection);
+  await ensureCommercialClientsExtendedColumns(connection);
+};
+
+const CLIENT_AREA_KEYS = ['compras', 'cartera', 'hse', 'mantenimiento', 'otros'];
+
+const ensureCommercialClientsExtendedColumns = async (connection) => {
+  await ensureColumn(connection, 'commercial_clients', 'rut', 'VARCHAR(80) NULL AFTER city');
+  await ensureColumn(connection, 'commercial_clients', 'contact_address', 'VARCHAR(255) NULL AFTER contact_phone');
+  await ensureColumn(connection, 'commercial_clients', 'contact_birth_date', 'DATE NULL AFTER contact_address');
+  await ensureColumn(connection, 'commercial_clients', 'area_contacts', 'JSON NULL AFTER areas');
+};
+
+const ensureVisitLocationsTable = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS visit_locations (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      visit_id INT NOT NULL,
+      lat DECIMAL(10,7) NOT NULL,
+      lng DECIMAL(10,7) NOT NULL,
+      recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      recorded_by INT NULL,
+      INDEX idx_visit_locations_visit (visit_id)
+    )
+  `);
+};
+
+const ensureQuotationLocationsTable = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS quotation_locations (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      quotation_id BIGINT NOT NULL,
+      lat DECIMAL(10,7) NOT NULL,
+      lng DECIMAL(10,7) NOT NULL,
+      recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      recorded_by INT NULL,
+      INDEX idx_quotation_locations_quotation (quotation_id)
+    )
+  `);
+};
+
+const ensureNearbyPlacesTables = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS nearby_places (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      name VARCHAR(255) NOT NULL,
+      type VARCHAR(80) NULL,
+      address VARCHAR(255) NULL,
+      phone VARCHAR(50) NULL,
+      notes TEXT NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `);
+
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS visit_nearby_places (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      visit_id INT NOT NULL,
+      nearby_place_id INT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_vnp_visit (visit_id),
+      INDEX idx_vnp_place (nearby_place_id)
+    )
+  `);
+};
+
+const recordVisitLocation = async (connection, { visitId, latitude, longitude, userId }) => {
+  if (visitId == null || latitude == null || longitude == null) return;
+  await connection.execute(
+    `INSERT INTO visit_locations (visit_id, lat, lng, recorded_at, recorded_by)
+     VALUES (?, ?, ?, NOW(), ?)`,
+    [visitId, latitude, longitude, userId ?? null],
+  );
+};
+
+const recordQuotationLocation = async (connection, { quotationId, latitude, longitude, userId }) => {
+  if (quotationId == null || latitude == null || longitude == null) return;
+  await connection.execute(
+    `INSERT INTO quotation_locations (quotation_id, lat, lng, recorded_at, recorded_by)
+     VALUES (?, ?, ?, NOW(), ?)`,
+    [quotationId, latitude, longitude, userId ?? null],
+  );
+};
+
+const normalizeClientAreas = (value) => {
+  if (value == null) return null;
+  if (Array.isArray(value)) {
+    const areas = value.map((item) => item?.toString().trim()).filter(Boolean);
+    return areas.length ? JSON.stringify(areas) : null;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return normalizeClientAreas(parsed);
+      }
+    } catch (_) {}
+    return JSON.stringify(
+      trimmed.split(',').map((item) => item.trim()).filter(Boolean),
+    );
+  }
+  return null;
+};
+
+const parseClientAreas = (raw) => {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw;
+  try {
+    const parsed = JSON.parse(raw.toString());
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+};
+
+const trimOrNull = (value) => {
+  const trimmed = (value ?? '').toString().trim();
+  return trimmed || null;
+};
+
+const parseAreaContacts = (raw) => {
+  if (raw == null) return {};
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (_) {
+      return {};
+    }
+  }
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const result = {};
+  CLIENT_AREA_KEYS.forEach((key) => {
+    const entry = parsed[key];
+    if (!entry || typeof entry !== 'object') return;
+    const name = trimOrNull(entry.name);
+    const email = trimOrNull(entry.email);
+    const phone = trimOrNull(entry.phone);
+    if (!name && !email && !phone) return;
+    result[key] = { name, email, phone };
+  });
+  return result;
+};
+
+const normalizeAreaContacts = (value) => {
+  const parsed = parseAreaContacts(value);
+  return Object.keys(parsed).length ? JSON.stringify(parsed) : null;
+};
+
+const mergeClientAreas = (areasPayload, areaContactsObj) => {
+  const merged = new Set(parseClientAreas(areasPayload));
+  Object.entries(areaContactsObj || {}).forEach(([key, entry]) => {
+    if (entry?.name) merged.add(key);
+  });
+  const list = [...merged].filter((item) => CLIENT_AREA_KEYS.includes(item));
+  return list.length ? JSON.stringify(list) : null;
+};
+
+const assessClientProfile = (row) => {
+  const missing = [];
+  const billingEmail = trimOrNull(row.billing_email);
+  const contactName = trimOrNull(row.contact_name);
+  const contactPhone = trimOrNull(row.contact_phone);
+  const rut = trimOrNull(row.rut);
+  const areaContacts = parseAreaContacts(row.area_contacts);
+  const filledAreas = CLIENT_AREA_KEYS.filter((key) => areaContacts[key]?.name);
+
+  if (!billingEmail) missing.push('email_facturacion');
+  if (!contactName) missing.push('nombre_contacto');
+  if (!contactPhone) missing.push('telefono_contacto');
+  if (!rut) missing.push('rut');
+  if (filledAreas.length === 0) missing.push('contactos_por_area');
+
+  return {
+    profile_complete: missing.length === 0,
+    missing_fields: missing,
+  };
+};
+
+const mapCommercialClientRow = (row) => {
+  const city = normalizeClientCity(row.city);
+  const businessName = (row.business_name ?? '').toString();
+  const areaContacts = parseAreaContacts(row.area_contacts);
+  const profile = assessClientProfile(row);
+  return {
+    id: row.id,
+    client_type: row.client_type,
+    nit: row.nit,
+    business_name: businessName,
+    city,
+    rut: row.rut,
+    display_label: !city ? businessName : `${businessName} · ${city}`,
+    billing_email: row.billing_email,
+    contact_name: row.contact_name,
+    contact_phone: row.contact_phone,
+    contact_address: row.contact_address,
+    contact_birth_date: normalizeDate(row.contact_birth_date),
+    areas: parseClientAreas(row.areas),
+    area_contacts: areaContacts,
+    profile_complete: profile.profile_complete,
+    missing_fields: profile.missing_fields,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+};
+
+const normalizeNearbyPlacePayload = (payload = {}) => ({
+  name: (payload.name || '').toString().trim(),
+  type: payload.type == null ? null : payload.type.toString().trim(),
+  address: payload.address == null ? null : payload.address.toString().trim(),
+  phone: payload.phone == null ? null : payload.phone.toString().trim(),
+  notes: payload.notes == null ? null : payload.notes.toString().trim(),
+});
+
+const attachNearbyPlacesToVisit = async (connection, visitId, nearbyPlaces = [], userId = null) => {
+  if (!visitId || !Array.isArray(nearbyPlaces) || nearbyPlaces.length === 0) return [];
+
+  const saved = [];
+  for (const rawPlace of nearbyPlaces) {
+    const place = normalizeNearbyPlacePayload(rawPlace);
+    if (!place.name) continue;
+
+    const [placeResult] = await connection.execute(
+      `INSERT INTO nearby_places (name, type, address, phone, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [place.name, place.type, place.address, place.phone, place.notes, userId],
+    );
+
+    await connection.execute(
+      'INSERT INTO visit_nearby_places (visit_id, nearby_place_id) VALUES (?, ?)',
+      [visitId, placeResult.insertId],
+    );
+
+    saved.push({ id: placeResult.insertId, ...place });
+  }
+
+  return saved;
+};
+
+const getNearbyPlacesForVisit = async (connection, visitId) => {
+  const [rows] = await connection.execute(
+    `SELECT np.id, np.name, np.type, np.address, np.phone, np.notes
+     FROM visit_nearby_places vnp
+     INNER JOIN nearby_places np ON np.id = vnp.nearby_place_id
+     WHERE vnp.visit_id = ?
+     ORDER BY vnp.id ASC`,
+    [visitId],
+  );
+  return rows;
+};
+
 const ensureCommercialSchema = async (connection) => {
   await ensureCommercialVisitsTable(connection);
   await ensureCommercialOpportunitiesTable(connection);
   await ensureCommercialFormTemplatesTable(connection);
+  await ensureCommercialClientsTable(connection);
+  await ensureVisitLocationsTable(connection);
+  await ensureQuotationLocationsTable(connection);
+  await ensureNearbyPlacesTables(connection);
+  await ensureCountersTable(connection);
+  await ensureQuotationsTable(connection);
+  await ensureOrdersOtTable(connection);
+};
+
+const ensureCountersTable = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS counters (
+      name VARCHAR(64) PRIMARY KEY,
+      value BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+};
+
+const ensureQuotationsTable = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS commercial_quotations (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      quotation_number VARCHAR(64) NOT NULL UNIQUE,
+      consecutive BIGINT NOT NULL,
+      commercial_initials VARCHAR(16) NOT NULL,
+      suffix CHAR(1) NOT NULL,
+      visit_id INT NULL,
+      project_id INT NULL,
+      budget DECIMAL(15,2) NOT NULL DEFAULT 0,
+      status ENUM('cotizado','aprobado','rechazado') NOT NULL DEFAULT 'cotizado',
+      approved_value DECIMAL(15,2) NULL,
+      approval_date DATETIME NULL,
+      billing_date DATETIME NULL,
+      billed_value DECIMAL(15,2) NULL,
+      observations TEXT NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_visit_id (visit_id),
+      INDEX idx_project_id (project_id)
+    )
+  `);
+};
+
+const ensureOrdersOtTable = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS orders_ot (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      ot_code VARCHAR(128) UNIQUE,
+      quotation_id BIGINT NULL,
+      assigned_by INT NULL,
+      assigned_at DATETIME NULL,
+      status ENUM('open','in_progress','closed') DEFAULT 'open',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_quotation_id (quotation_id)
+    )
+  `);
+};
+
+const computeInitials = (fullName) => {
+  if (!fullName) return '';
+  const parts = fullName.toString().trim().split(/\s+/).filter(Boolean);
+  const initials = parts.map((p) => p[0].toUpperCase()).join('');
+  return initials.slice(0, 4);
+};
+
+const createQuotation = async (req, res) => {
+  let connection;
+  try {
+    const payload = req.body || {};
+    const visitId = payload.visit_id ? Number(payload.visit_id) : null;
+    const projectId = payload.project_id ? Number(payload.project_id) : null;
+    const budget = payload.budget ? Number(payload.budget) : 0;
+    if (!visitId && !projectId) {
+      return res.status(400).json({ success: false, message: 'Se requiere visit_id o project_id para crear una cotización' });
+    }
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+
+    await connection.beginTransaction();
+
+    const initials = computeInitials(req.user?.name || req.user?.fullName || '');
+    let consecutive;
+    let suffixChar;
+
+    const findExistingGroup = async () => {
+      if (visitId) {
+        const [rows] = await connection.execute(
+          `SELECT consecutive, commercial_initials
+           FROM commercial_quotations
+           WHERE visit_id = ? AND commercial_initials = ?
+           ORDER BY id ASC
+           LIMIT 1`,
+          [visitId, initials],
+        );
+        return rows[0] || null;
+      }
+      if (projectId) {
+        const [rows] = await connection.execute(
+          `SELECT consecutive, commercial_initials
+           FROM commercial_quotations
+           WHERE project_id = ? AND commercial_initials = ?
+           ORDER BY id ASC
+           LIMIT 1`,
+          [projectId, initials],
+        );
+        return rows[0] || null;
+      }
+      return null;
+    };
+
+    const existingGroup = await findExistingGroup();
+    if (existingGroup) {
+      consecutive = Number(existingGroup.consecutive);
+      const base = `${consecutive}${initials}`;
+      const [countRows] = await connection.execute(
+        'SELECT COUNT(*) as cnt FROM commercial_quotations WHERE quotation_number LIKE ?',
+        [`${base}-%`],
+      );
+      const existingCount = Number(countRows[0].cnt || 0);
+      if (existingCount >= 26) {
+        await connection.rollback();
+        return res.status(409).json({
+          success: false,
+          message: 'Se alcanzó el límite de cotizaciones (A-Z) para esta visita o proyecto',
+        });
+      }
+      suffixChar = String.fromCharCode(65 + existingCount);
+    } else {
+      const [counterRows] = await connection.execute('SELECT value FROM counters WHERE name = ? FOR UPDATE', ['quotation']);
+      if (counterRows.length === 0) {
+        consecutive = 1;
+        await connection.execute('INSERT INTO counters (name, value) VALUES (?, ?)', ['quotation', consecutive]);
+      } else {
+        consecutive = Number(counterRows[0].value || 0) + 1;
+        await connection.execute('UPDATE counters SET value = ? WHERE name = ?', [consecutive, 'quotation']);
+      }
+      suffixChar = 'A';
+    }
+
+    const quotationNumber = `${consecutive}${initials}-${suffixChar}`;
+
+    const [result] = await connection.execute(
+      `INSERT INTO commercial_quotations (
+         quotation_number, consecutive, commercial_initials, suffix, visit_id, project_id, budget, status, observations, created_by
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [quotationNumber, consecutive, initials, suffixChar, visitId, projectId, budget, 'cotizado', payload.observations || null, req.user?.id ?? null]
+    );
+
+    await applyAuditContext(connection, req);
+
+    const normalizedLatitude = normalizeNumber(payload.latitude);
+    const normalizedLongitude = normalizeNumber(payload.longitude);
+    await recordQuotationLocation(connection, {
+      quotationId: result.insertId,
+      latitude: normalizedLatitude,
+      longitude: normalizedLongitude,
+      userId: req.user?.id ?? null,
+    });
+
+    await connection.commit();
+
+    const [rows] = await connection.execute('SELECT * FROM commercial_quotations WHERE id = ? LIMIT 1', [result.insertId]);
+    res.status(201).json({ success: true, message: 'Cotización creada', data: rows[0] });
+  } catch (error) {
+    console.error('createQuotation error:', error);
+    try { await connection?.rollback(); } catch (_) {}
+    res.status(500).json({ success: false, message: 'Error al crear cotización', error: error.message });
+  } finally {
+    connection?.release();
+  }
 };
 
 const getCommercialFormTemplates = async (req, res) => {
@@ -845,7 +1508,7 @@ const getCommercialVisits = async (req, res) => {
     }
 
     connection = await pool.getConnection();
-    await ensureCommercialVisitsTable(connection);
+    await ensureCommercialSchema(connection);
 
     const filters = [];
     const params = [];
@@ -869,7 +1532,7 @@ const getCommercialVisits = async (req, res) => {
       params,
     );
 
-    res.json({ success: true, data: rows.map(mapVisitRow) });
+    res.json({ success: true, data: rows.map((row) => mapVisitRow(row, req)) });
   } catch (error) {
     console.error('getCommercialVisits error:', error);
     res.status(500).json({ success: false, message: 'Error al obtener visitas comerciales', error: error.message });
@@ -961,7 +1624,28 @@ const getCommercialSummary = async (req, res) => {
        FROM commercial_opportunities`
     );
 
-    res.json({ success: true, data: { ...visitSummary, ...opportunitySummary } });
+    const [[quotationSummary]] = await connection.execute(
+      `SELECT
+         COUNT(*) AS total_quotations,
+         SUM(CASE WHEN status = 'cotizado' THEN 1 ELSE 0 END) AS pending_quotations,
+         SUM(CASE WHEN status = 'aprobado' THEN 1 ELSE 0 END) AS approved_quotations,
+         COALESCE(SUM(budget), 0) AS quotation_budget_total
+       FROM commercial_quotations`
+    );
+
+    const [[clientSummary]] = await connection.execute(
+      'SELECT COUNT(*) AS total_clients FROM commercial_clients'
+    );
+
+    res.json({
+      success: true,
+      data: {
+        ...visitSummary,
+        ...opportunitySummary,
+        ...quotationSummary,
+        ...clientSummary,
+      },
+    });
   } catch (error) {
     console.error('getCommercialSummary error:', error);
     res.status(500).json({ success: false, message: 'Error al obtener resumen comercial', error: error.message });
@@ -974,8 +1658,7 @@ const getCommercialBoard = async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
-    await ensureCommercialVisitsTable(connection);
-    await ensureCommercialOpportunitiesTable(connection);
+    await ensureCommercialSchema(connection);
 
     const [[visitAlerts]] = await connection.execute(
       `SELECT
@@ -1038,14 +1721,97 @@ const getCommercialBoard = async (req, res) => {
        LIMIT 6`
     );
 
+    const [projectCommercialSnapshot] = await connection.execute(
+      `SELECT
+         p.id AS project_id,
+         p.name AS project_name,
+         COALESCE(v.visit_count, 0) AS visit_count,
+         COALESCE(o.opportunity_count, 0) AS opportunity_count,
+         COALESCE(q.quotation_count, 0) AS quotation_count,
+         COALESCE(o.pipeline_value, 0) AS pipeline_value
+       FROM projects p
+       LEFT JOIN (
+         SELECT project_id, COUNT(*) AS visit_count
+         FROM commercial_visits
+         WHERE project_id IS NOT NULL
+         GROUP BY project_id
+       ) v ON v.project_id = p.id
+       LEFT JOIN (
+         SELECT
+           project_id,
+           COUNT(*) AS opportunity_count,
+           COALESCE(SUM(CASE WHEN stage NOT IN ('won', 'lost') THEN estimated_value ELSE 0 END), 0) AS pipeline_value
+         FROM commercial_opportunities
+         WHERE project_id IS NOT NULL
+         GROUP BY project_id
+       ) o ON o.project_id = p.id
+       LEFT JOIN (
+         SELECT project_id, COUNT(*) AS quotation_count
+         FROM commercial_quotations
+         WHERE project_id IS NOT NULL
+         GROUP BY project_id
+       ) q ON q.project_id = p.id
+       WHERE COALESCE(v.visit_count, 0) + COALESCE(o.opportunity_count, 0) + COALESCE(q.quotation_count, 0) > 0
+       ORDER BY pipeline_value DESC, visit_count DESC, quotation_count DESC
+       LIMIT 8`
+    );
+
+    let geoAudit = [];
+    if (canViewInternalLocation(req.user?.role)) {
+      const [visitGeoRows] = await connection.execute(
+        `SELECT
+           cv.id AS visit_id,
+           cv.client_name,
+           cv.visit_date,
+           cv.project_id,
+           p.name AS project_name,
+           vl.lat AS latitude,
+           vl.lng AS longitude,
+           vl.recorded_at,
+           'visit' AS source_type
+         FROM visit_locations vl
+         INNER JOIN commercial_visits cv ON cv.id = vl.visit_id
+         LEFT JOIN projects p ON p.id = cv.project_id
+         ORDER BY vl.recorded_at DESC
+         LIMIT 8`,
+      );
+      const [quotationGeoRows] = await connection.execute(
+        `SELECT
+           cq.id AS quotation_id,
+           cq.quotation_number,
+           cq.project_id,
+           p.name AS project_name,
+           ql.lat AS latitude,
+           ql.lng AS longitude,
+           ql.recorded_at,
+           'quotation' AS source_type
+         FROM quotation_locations ql
+         INNER JOIN commercial_quotations cq ON cq.id = ql.quotation_id
+         LEFT JOIN projects p ON p.id = cq.project_id
+         ORDER BY ql.recorded_at DESC
+         LIMIT 8`,
+      );
+      geoAudit = [...visitGeoRows, ...quotationGeoRows]
+        .sort((left, right) => new Date(right.recorded_at).getTime() - new Date(left.recorded_at).getTime())
+        .slice(0, 10)
+        .map((row) => ({
+          ...row,
+          visit_date: row.visit_date ? normalizeDate(row.visit_date) : null,
+          latitude: row.latitude != null ? Number(row.latitude) : null,
+          longitude: row.longitude != null ? Number(row.longitude) : null,
+        }));
+    }
+
     res.json({
       success: true,
       data: {
         alerts: { ...visitAlerts, ...opportunityAlerts },
         top_clients: topClients.map((row) => ({ ...row, last_visit_date: normalizeDate(row.last_visit_date) })),
-        upcoming_actions: upcomingActions.map(mapVisitRow),
+        upcoming_actions: upcomingActions.map((row) => mapVisitRow(row, req)),
         opportunity_stage_summary: opportunityStageSummary,
         urgent_opportunities: urgentOpportunities.map(mapOpportunityRow),
+        project_commercial_snapshot: projectCommercialSnapshot,
+        geo_audit: geoAudit,
       },
     });
   } catch (error) {
@@ -1065,8 +1831,7 @@ const getCommercialClientHistory = async (req, res) => {
     }
 
     connection = await pool.getConnection();
-    await ensureCommercialVisitsTable(connection);
-    await ensureCommercialOpportunitiesTable(connection);
+    await ensureCommercialSchema(connection);
 
     const clientKey = normalizeClientMatchKey(clientName);
     const [visitRows] = await connection.execute(
@@ -1084,7 +1849,7 @@ const getCommercialClientHistory = async (req, res) => {
       [clientKey],
     );
 
-    const visits = visitRows.map(mapVisitRow);
+    const visits = visitRows.map((row) => mapVisitRow(row, req));
     const opportunities = opportunityRows.map(mapOpportunityRow);
     const lastVisit = visits[0] || null;
     const openOpportunities = opportunities.filter((item) => !['won', 'lost'].includes(item.stage));
@@ -1137,11 +1902,18 @@ const createCommercialVisit = async (req, res) => {
   let connection;
   try {
     const {
+      client_id,
       client_name,
       client_contact,
       visit_date,
       latitude,
       longitude,
+      city,
+      service_scope,
+      site_conditions,
+      access_types,
+      delivery_time_estimate,
+      will_generate_quotation,
       form_type,
       form_payload,
       summary,
@@ -1152,6 +1924,7 @@ const createCommercialVisit = async (req, res) => {
       expense_amount,
       status,
       project_id,
+      nearby_places,
     } = req.body;
 
     const normalizedStatus = normalizeStatus(status);
@@ -1161,7 +1934,12 @@ const createCommercialVisit = async (req, res) => {
     const normalizedVisitDate = normalizeDate(visit_date);
     const normalizedNextActionDate = normalizeDate(next_action_date);
     const normalizedProjectId = normalizeNumber(project_id);
+    const normalizedClientId = normalizeNumber(client_id);
+    const normalizedCommercialId = normalizeNumber(req.body.commercial_id) ?? req.user?.id ?? null;
     const serializedPayload = serializeFormPayload(form_payload);
+    const willGenerateQuotation = will_generate_quotation === undefined
+      ? 0
+      : (['1', 'true', 'yes', 1, true].includes(will_generate_quotation) ? 1 : 0);
 
     if (!client_name || !client_name.toString().trim()) {
       return res.status(400).json({ success: false, message: 'El cliente es obligatorio' });
@@ -1177,15 +1955,22 @@ const createCommercialVisit = async (req, res) => {
     }
 
     connection = await pool.getConnection();
-    await ensureCommercialVisitsTable(connection);
-    await ensureCommercialOpportunitiesTable(connection);
+    await ensureCommercialSchema(connection);
     await applyAuditContext(connection, req);
 
     const [result] = await connection.execute(
       `INSERT INTO commercial_visits (
+         client_id,
          client_name,
          client_contact,
          visit_date,
+         city,
+         service_scope,
+         site_conditions,
+         access_types,
+         delivery_time_estimate,
+         will_generate_quotation,
+         commercial_id,
          latitude,
          longitude,
          form_type,
@@ -1199,11 +1984,19 @@ const createCommercialVisit = async (req, res) => {
          status,
          project_id,
          created_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        normalizedClientId,
         client_name.toString().trim(),
         client_contact ? client_contact.toString().trim() : null,
         normalizedVisitDate,
+        city == null ? null : city.toString().trim(),
+        service_scope == null ? null : service_scope.toString().trim(),
+        site_conditions == null ? null : site_conditions.toString().trim(),
+        access_types == null ? null : access_types.toString().trim(),
+        delivery_time_estimate == null ? null : delivery_time_estimate.toString().trim(),
+        willGenerateQuotation,
+        normalizedCommercialId,
         normalizedLatitude,
         normalizedLongitude,
         form_type ? form_type.toString().trim() : null,
@@ -1220,8 +2013,25 @@ const createCommercialVisit = async (req, res) => {
       ],
     );
 
+    await recordVisitLocation(connection, {
+      visitId: result.insertId,
+      latitude: normalizedLatitude,
+      longitude: normalizedLongitude,
+      userId: req.user?.id ?? null,
+    });
+
+    const savedNearbyPlaces = await attachNearbyPlacesToVisit(
+      connection,
+      result.insertId,
+      nearby_places,
+      req.user?.id ?? null,
+    );
+
     const [rows] = await connection.execute(`${COMMERCIAL_VISIT_SELECT} WHERE cv.id = ?`, [result.insertId]);
-    const visitRow = mapVisitRow(rows[0]);
+    const visitRow = mapVisitRow(rows[0], req);
+    if (savedNearbyPlaces.length > 0) {
+      visitRow.nearby_places = savedNearbyPlaces;
+    }
     const automationResult = await upsertOpportunityFromVisit({ connection, req, visit: visitRow });
     res.status(201).json({
       success: true,
@@ -1244,8 +2054,7 @@ const updateCommercialVisit = async (req, res) => {
   try {
     const { id } = req.params;
     connection = await pool.getConnection();
-    await ensureCommercialVisitsTable(connection);
-    await ensureCommercialOpportunitiesTable(connection);
+    await ensureCommercialSchema(connection);
 
     const [existingRows] = await connection.execute('SELECT * FROM commercial_visits WHERE id = ? LIMIT 1', [id]);
     if (existingRows.length === 0) {
@@ -1258,6 +2067,9 @@ const updateCommercialVisit = async (req, res) => {
     const nextLatitude = req.body.latitude == null ? normalizeNumber(existing.latitude) : normalizeNumber(req.body.latitude);
     const nextLongitude = req.body.longitude == null ? normalizeNumber(existing.longitude) : normalizeNumber(req.body.longitude);
     const nextActionDate = req.body.next_action_date == null ? normalizeDate(existing.next_action_date) : normalizeDate(req.body.next_action_date);
+    const nextWillGenerateQuotation = req.body.will_generate_quotation === undefined
+      ? Number(existing.will_generate_quotation || 0)
+      : (['1', 'true', 'yes', 1, true].includes(req.body.will_generate_quotation) ? 1 : 0);
 
     if (nextStatus === null) {
       return res.status(400).json({ success: false, message: 'Estado comercial no válido' });
@@ -1272,9 +2084,17 @@ const updateCommercialVisit = async (req, res) => {
     await applyAuditContext(connection, req);
     await connection.execute(
       `UPDATE commercial_visits
-       SET client_name = ?,
+       SET client_id = ?,
+           client_name = ?,
            client_contact = ?,
            visit_date = ?,
+           city = ?,
+           service_scope = ?,
+           site_conditions = ?,
+           access_types = ?,
+           delivery_time_estimate = ?,
+           will_generate_quotation = ?,
+           commercial_id = ?,
            latitude = ?,
            longitude = ?,
            form_type = ?,
@@ -1290,9 +2110,21 @@ const updateCommercialVisit = async (req, res) => {
            updated_at = NOW()
        WHERE id = ?`,
       [
+        req.body.client_id == null ? existing.client_id : normalizeNumber(req.body.client_id),
         (req.body.client_name ?? existing.client_name).toString().trim(),
         req.body.client_contact == null ? existing.client_contact : (req.body.client_contact?.toString().trim() || null),
         nextVisitDate,
+        req.body.city == null ? existing.city : (req.body.city?.toString().trim() || null),
+        req.body.service_scope == null ? existing.service_scope : (req.body.service_scope?.toString().trim() || null),
+        req.body.site_conditions == null ? existing.site_conditions : (req.body.site_conditions?.toString().trim() || null),
+        req.body.access_types == null ? existing.access_types : (req.body.access_types?.toString().trim() || null),
+        req.body.delivery_time_estimate == null
+          ? existing.delivery_time_estimate
+          : (req.body.delivery_time_estimate?.toString().trim() || null),
+        nextWillGenerateQuotation,
+        req.body.commercial_id == null
+          ? (existing.commercial_id ?? req.user?.id ?? null)
+          : normalizeNumber(req.body.commercial_id),
         nextLatitude,
         nextLongitude,
         req.body.form_type == null ? existing.form_type : (req.body.form_type?.toString().trim() || null),
@@ -1309,8 +2141,22 @@ const updateCommercialVisit = async (req, res) => {
       ],
     );
 
+    if (req.body.latitude != null || req.body.longitude != null) {
+      await recordVisitLocation(connection, {
+        visitId: Number(id),
+        latitude: nextLatitude,
+        longitude: nextLongitude,
+        userId: req.user?.id ?? null,
+      });
+    }
+
+    if (Array.isArray(req.body.nearby_places) && req.body.nearby_places.length > 0) {
+      await attachNearbyPlacesToVisit(connection, Number(id), req.body.nearby_places, req.user?.id ?? null);
+    }
+
     const [rows] = await connection.execute(`${COMMERCIAL_VISIT_SELECT} WHERE cv.id = ?`, [id]);
-    const visitRow = mapVisitRow(rows[0]);
+    const visitRow = mapVisitRow(rows[0], req);
+    visitRow.nearby_places = await getNearbyPlacesForVisit(connection, Number(id));
     const automationResult = await upsertOpportunityFromVisit({ connection, req, visit: visitRow });
     res.json({
       success: true,
@@ -1323,6 +2169,276 @@ const updateCommercialVisit = async (req, res) => {
   } catch (error) {
     console.error('updateCommercialVisit error:', error);
     res.status(500).json({ success: false, message: 'Error al actualizar visita comercial', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const listCommercialClients = async (req, res) => {
+  let connection;
+  try {
+    const search = (req.query.q || '').toString().trim();
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+
+    const filters = [];
+    const params = [];
+    if (search) {
+      filters.push('(business_name LIKE ? OR nit LIKE ? OR city LIKE ?)');
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+
+    const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+    const [rows] = await connection.execute(
+      `SELECT * FROM commercial_clients ${whereClause} ORDER BY business_name ASC, city ASC LIMIT 100`,
+      params,
+    );
+
+    res.json({ success: true, data: rows.map(mapCommercialClientRow) });
+  } catch (error) {
+    console.error('listCommercialClients error:', error);
+    res.status(500).json({ success: false, message: 'Error al listar clientes comerciales', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const getCommercialClientById = async (req, res) => {
+  let connection;
+  try {
+    const clientId = normalizeNumber(req.params.id);
+    if (!clientId) {
+      return res.status(400).json({ success: false, message: 'Identificador de cliente no válido' });
+    }
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+    const [rows] = await connection.execute('SELECT * FROM commercial_clients WHERE id = ? LIMIT 1', [clientId]);
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Cliente comercial no encontrado' });
+    }
+
+    res.json({ success: true, data: mapCommercialClientRow(rows[0]) });
+  } catch (error) {
+    console.error('getCommercialClientById error:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener cliente comercial', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const createCommercialClient = async (req, res) => {
+  let connection;
+  try {
+    const payload = req.body || {};
+    const clientType = (payload.client_type || '').toString().trim().toLowerCase();
+    const nit = (payload.nit || '').toString().trim();
+    const businessName = (payload.business_name || '').toString().trim();
+    const city = normalizeClientCity(payload.city);
+    const billingEmail = (payload.billing_email || '').toString().trim();
+    const contactName = (payload.contact_name || '').toString().trim();
+    const contactPhone = (payload.contact_phone || '').toString().trim();
+    const rut = (payload.rut || '').toString().trim();
+    const contactAddress = (payload.contact_address || '').toString().trim();
+    const contactBirthDate = normalizeDate(payload.contact_birth_date);
+    const areaContactsObj = parseAreaContacts(payload.area_contacts);
+    const areasJson = mergeClientAreas(payload.areas, areaContactsObj);
+    const areaContactsJson = normalizeAreaContacts(areaContactsObj);
+
+    if (!['juridica', 'natural'].includes(clientType)) {
+      return res.status(400).json({ success: false, message: 'Tipo de cliente inválido (juridica o natural)' });
+    }
+    if (!nit) {
+      return res.status(400).json({ success: false, message: 'NIT / identificación es obligatorio' });
+    }
+    if (!businessName) {
+      return res.status(400).json({ success: false, message: 'Razón social es obligatoria' });
+    }
+    if (!city) {
+      return res.status(400).json({ success: false, message: 'Ciudad / sede es obligatoria para diferenciar puntos del mismo NIT' });
+    }
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+
+    const [existingRows] = await connection.execute(
+      'SELECT id, city FROM commercial_clients WHERE nit = ? AND LOWER(TRIM(city)) = LOWER(?) LIMIT 1',
+      [nit, city],
+    );
+    if (existingRows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Ya existe una sede de este cliente en ${existingRows[0].city}. Busca por NIT y selecciona la ciudad correcta.`,
+      });
+    }
+
+    await applyAuditContext(connection, req);
+    const [result] = await connection.execute(
+      `INSERT INTO commercial_clients (
+         client_type, nit, business_name, city, rut, billing_email, contact_name, contact_phone,
+         contact_address, contact_birth_date, areas, area_contacts, created_by
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        clientType,
+        nit,
+        businessName,
+        city,
+        rut || null,
+        billingEmail || null,
+        contactName || null,
+        contactPhone || null,
+        contactAddress || null,
+        contactBirthDate,
+        areasJson,
+        areaContactsJson,
+        req.user?.id ?? null,
+      ],
+    );
+
+    const [rows] = await connection.execute('SELECT * FROM commercial_clients WHERE id = ? LIMIT 1', [result.insertId]);
+    res.status(201).json({ success: true, message: 'Cliente comercial registrado', data: mapCommercialClientRow(rows[0]) });
+  } catch (error) {
+    console.error('createCommercialClient error:', error);
+    res.status(500).json({ success: false, message: 'Error al crear cliente comercial', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const updateCommercialClient = async (req, res) => {
+  let connection;
+  try {
+    const clientId = normalizeNumber(req.params.id);
+    if (!clientId) {
+      return res.status(400).json({ success: false, message: 'Identificador de cliente no válido' });
+    }
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+
+    const [existingRows] = await connection.execute('SELECT * FROM commercial_clients WHERE id = ? LIMIT 1', [clientId]);
+    if (existingRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Cliente comercial no encontrado' });
+    }
+
+    const existing = existingRows[0];
+    const payload = req.body || {};
+    const clientType = payload.client_type == null
+      ? existing.client_type
+      : payload.client_type.toString().trim().toLowerCase();
+    const nit = payload.nit == null ? existing.nit : payload.nit.toString().trim();
+    const businessName = payload.business_name == null
+      ? existing.business_name
+      : payload.business_name.toString().trim();
+    const city = payload.city == null ? normalizeClientCity(existing.city) : normalizeClientCity(payload.city);
+    const rut = payload.rut === undefined ? existing.rut : trimOrNull(payload.rut);
+    const billingEmail = payload.billing_email === undefined ? existing.billing_email : trimOrNull(payload.billing_email);
+    const contactName = payload.contact_name === undefined ? existing.contact_name : trimOrNull(payload.contact_name);
+    const contactPhone = payload.contact_phone === undefined ? existing.contact_phone : trimOrNull(payload.contact_phone);
+    const contactAddress = payload.contact_address === undefined
+      ? existing.contact_address
+      : trimOrNull(payload.contact_address);
+    const contactBirthDate = payload.contact_birth_date === undefined
+      ? normalizeDate(existing.contact_birth_date)
+      : normalizeDate(payload.contact_birth_date);
+
+    if (!['juridica', 'natural'].includes(clientType)) {
+      return res.status(400).json({ success: false, message: 'Tipo de cliente inválido (juridica o natural)' });
+    }
+    if (!nit) {
+      return res.status(400).json({ success: false, message: 'NIT / identificación es obligatorio' });
+    }
+    if (!businessName) {
+      return res.status(400).json({ success: false, message: 'Razón social es obligatoria' });
+    }
+    if (!city) {
+      return res.status(400).json({ success: false, message: 'Ciudad / sede es obligatoria' });
+    }
+
+    const [duplicateRows] = await connection.execute(
+      'SELECT id FROM commercial_clients WHERE nit = ? AND LOWER(TRIM(city)) = LOWER(?) AND id <> ? LIMIT 1',
+      [nit, city, clientId],
+    );
+    if (duplicateRows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Ya existe otra sede de este cliente en ${city}.`,
+      });
+    }
+
+    const nextAreaContactsObj = payload.area_contacts === undefined
+      ? parseAreaContacts(existing.area_contacts)
+      : parseAreaContacts(payload.area_contacts);
+    const nextAreasJson = payload.areas === undefined && payload.area_contacts === undefined
+      ? existing.areas
+      : mergeClientAreas(payload.areas ?? parseClientAreas(existing.areas), nextAreaContactsObj);
+    const nextAreaContactsJson = normalizeAreaContacts(nextAreaContactsObj);
+
+    await applyAuditContext(connection, req);
+    await connection.execute(
+      `UPDATE commercial_clients
+       SET client_type = ?,
+           nit = ?,
+           business_name = ?,
+           city = ?,
+           rut = ?,
+           billing_email = ?,
+           contact_name = ?,
+           contact_phone = ?,
+           contact_address = ?,
+           contact_birth_date = ?,
+           areas = ?,
+           area_contacts = ?,
+           updated_at = NOW()
+       WHERE id = ?`,
+      [
+        clientType,
+        nit,
+        businessName,
+        city,
+        rut,
+        billingEmail,
+        contactName,
+        contactPhone,
+        contactAddress,
+        contactBirthDate,
+        nextAreasJson,
+        nextAreaContactsJson,
+        clientId,
+      ],
+    );
+
+    const [rows] = await connection.execute('SELECT * FROM commercial_clients WHERE id = ? LIMIT 1', [clientId]);
+    res.json({ success: true, message: 'Cliente comercial actualizado', data: mapCommercialClientRow(rows[0]) });
+  } catch (error) {
+    console.error('updateCommercialClient error:', error);
+    res.status(500).json({ success: false, message: 'Error al actualizar cliente comercial', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const getVisitNearbyPlaces = async (req, res) => {
+  let connection;
+  try {
+    const visitId = normalizeNumber(req.params.id);
+    if (!visitId) {
+      return res.status(400).json({ success: false, message: 'Identificador de visita no válido' });
+    }
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+    const [visitRows] = await connection.execute('SELECT id FROM commercial_visits WHERE id = ? LIMIT 1', [visitId]);
+    if (!visitRows.length) {
+      return res.status(404).json({ success: false, message: 'Visita comercial no encontrada' });
+    }
+
+    const places = await getNearbyPlacesForVisit(connection, visitId);
+    res.json({ success: true, data: places });
+  } catch (error) {
+    console.error('getVisitNearbyPlaces error:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener lugares cercanos', error: error.message });
   } finally {
     connection?.release();
   }
@@ -1524,11 +2640,20 @@ module.exports = {
   getCommercialSummary,
   getCommercialBoard,
   getCommercialClientHistory,
+  listCommercialClients,
+  getCommercialClientById,
+  createCommercialClient,
+  updateCommercialClient,
+  getVisitNearbyPlaces,
   createCommercialFormTemplate,
   createCommercialVisit,
   updateCommercialFormTemplate,
   updateCommercialVisit,
   createCommercialOpportunity,
   updateCommercialOpportunity,
+  createQuotation,
+  listQuotations,
+  getQuotationById,
+  approveQuotation,
   ensureCommercialSchema,
 };

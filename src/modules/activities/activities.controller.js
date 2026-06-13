@@ -123,6 +123,14 @@ const ensureActivityLegacyShape = async (connection) => {
   try {
     await connection.execute('ALTER TABLE activities ADD COLUMN evidences INT DEFAULT 0');
   } catch (e) {}
+
+  try {
+    await connection.execute('ALTER TABLE activities ADD COLUMN executed_area_m2 DECIMAL(12,2) NOT NULL DEFAULT 0.00');
+  } catch (e) {}
+
+  try {
+    await connection.execute('ALTER TABLE activities ADD COLUMN executed_length_ml DECIMAL(12,2) NOT NULL DEFAULT 0.00');
+  } catch (e) {}
 };
 
 const syncLegacyActivityRow = async (connection, activityId) => {
@@ -294,7 +302,7 @@ const getActivityById = async (req, res) => {
 // Crear actividad nueva
 const createActivity = async (req, res) => {
   try {
-    const { project_id, employee_id, description, start_time, end_time, status } = req.body;
+    const { project_id, employee_id, description, start_time, end_time, status, executed_area_m2, executed_length_ml } = req.body;
 
     if (!project_id || !employee_id) {
       return res.status(400).json({ success: false, message: 'project_id y employee_id son requeridos' });
@@ -317,10 +325,12 @@ const createActivity = async (req, res) => {
     const normalizedStatus = normalizeActivityStatus(status);
     await applyAuditContext(connection, req);
 
+    const resolvedExecutedArea = Number(executed_area_m2) || 0;
+    const resolvedExecutedLength = Number(executed_length_ml) || 0;
     const [result] = await connection.execute(
-      `INSERT INTO activities (project_id, employee_id, description, start_time, end_time, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-      [project_id, employee_id, description || null, start_time || null, end_time || null, normalizedStatus]
+      `INSERT INTO activities (project_id, employee_id, description, start_time, end_time, status, executed_area_m2, executed_length_ml, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [project_id, employee_id, description || null, start_time || null, end_time || null, normalizedStatus, resolvedExecutedArea, resolvedExecutedLength]
     );
     await syncLegacyActivityRow(connection, result.insertId);
     connection.release();
@@ -336,7 +346,7 @@ const createActivity = async (req, res) => {
 const updateActivity = async (req, res) => {
   try {
     const { id } = req.params;
-    const { project_id, employee_id, description, start_time, end_time, status } = req.body;
+    const { project_id, employee_id, description, start_time, end_time, status, executed_area_m2, executed_length_ml } = req.body;
     const normalizedRole = normalizeRole(req.user?.role);
     const connection = await pool.getConnection();
     // ensure columns exist as well
@@ -398,13 +408,15 @@ const updateActivity = async (req, res) => {
     const desc = description !== undefined ? description : existing.description;
     const st = start_time !== undefined ? start_time : existing.start_time;
     const et = end_time !== undefined ? end_time : existing.end_time;
+    const resolvedExecutedArea = executed_area_m2 !== undefined ? Number(executed_area_m2) : Number(existing.executed_area_m2 || 0);
+    const resolvedExecutedLength = executed_length_ml !== undefined ? Number(executed_length_ml) : Number(existing.executed_length_ml || 0);
     const stts = status !== undefined ? normalizeActivityStatus(status) : normalizeActivityStatus(existing.status);
 
     await applyAuditContext(connection, req);
     await connection.execute(
-      `UPDATE activities SET project_id = ?, employee_id = ?, description = ?, start_time = ?, end_time = ?, status = ?, updated_at = NOW()
+      `UPDATE activities SET project_id = ?, employee_id = ?, description = ?, start_time = ?, end_time = ?, status = ?, executed_area_m2 = ?, executed_length_ml = ?, updated_at = NOW()
        WHERE id = ?`,
-      [pid, eid, desc, st, et, stts, id]
+      [pid, eid, desc, st, et, stts, resolvedExecutedArea, resolvedExecutedLength, id]
     );
     await syncLegacyActivityRow(connection, id);
     connection.release();

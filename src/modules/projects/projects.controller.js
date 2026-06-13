@@ -84,10 +84,21 @@ const ensureProjectActualEndDateSchema = async (connection) => {
   } catch (e) {}
 };
 
+const ensureProjectMeterFieldsSchema = async (connection) => {
+  try {
+    await connection.execute('ALTER TABLE projects ADD COLUMN planned_area_m2 DECIMAL(12,2) NOT NULL DEFAULT 0.00');
+  } catch (e) {}
+
+  try {
+    await connection.execute('ALTER TABLE projects ADD COLUMN planned_length_ml DECIMAL(12,2) NOT NULL DEFAULT 0.00');
+  } catch (e) {}
+};
+
 const ensureProjectsSchema = async (connection) => {
   await ensureProjectStatusSchema(connection);
   await ensureProjectOtSchema(connection);
   await ensureProjectActualEndDateSchema(connection);
+  await ensureProjectMeterFieldsSchema(connection);
   await ensureProjectCollaboratorsSchema(connection);
 };
 
@@ -131,6 +142,7 @@ const getProjects = async (req, res) => {
     await ensureProjectStatusSchema(connection);
     await ensureProjectOtSchema(connection);
     await ensureProjectActualEndDateSchema(connection);
+    await ensureProjectMeterFieldsSchema(connection);
     await ensureOperationalScopeShape(connection);
 
     const normalizedRole = normalizeRole(req.user?.role);
@@ -176,6 +188,7 @@ const getProjectById = async (req, res) => {
     await ensureProjectStatusSchema(connection);
     await ensureProjectOtSchema(connection);
     await ensureProjectActualEndDateSchema(connection);
+    await ensureProjectMeterFieldsSchema(connection);
     await ensureOperationalScopeShape(connection);
 
     const normalizedRole = normalizeRole(req.user?.role);
@@ -222,7 +235,7 @@ const getProjectById = async (req, res) => {
 // Crear nuevo proyecto
 const createProject = async (req, res) => {
   try {
-    const { name, description, budget, start_date, end_date, actual_end_date, manager_id, status } = req.body;
+    const { name, description, budget, start_date, end_date, actual_end_date, manager_id, status, planned_area_m2, planned_length_ml } = req.body;
 
     if (!name || !budget) {
       return res.status(400).json({
@@ -235,15 +248,30 @@ const createProject = async (req, res) => {
     await ensureProjectStatusSchema(connection);
     await ensureProjectOtSchema(connection);
     await ensureProjectActualEndDateSchema(connection);
+    await ensureProjectMeterFieldsSchema(connection);
 
     const normalizedStatus = normalizeProjectStatus(status);
     const resolvedActualEndDate = isFinalStatus(normalizedStatus)
       ? (actual_end_date || todayIsoDate())
       : null;
+    
+    // Safe conversion of meter fields
+    let resolvedPlannedArea = 0;
+    if (planned_area_m2 !== undefined && planned_area_m2 !== null && planned_area_m2 !== '') {
+      const parsed = parseFloat(planned_area_m2);
+      resolvedPlannedArea = isNaN(parsed) ? 0 : Math.max(0, parsed);
+    }
+    
+    let resolvedPlannedLength = 0;
+    if (planned_length_ml !== undefined && planned_length_ml !== null && planned_length_ml !== '') {
+      const parsed = parseFloat(planned_length_ml);
+      resolvedPlannedLength = isNaN(parsed) ? 0 : Math.max(0, parsed);
+    }
+    
     await applyAuditContext(connection, req);
     const [result] = await connection.execute(
-      'INSERT INTO projects (name, description, budget, start_date, end_date, actual_end_date, manager_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())',
-      [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, manager_id || null, normalizedStatus]
+      'INSERT INTO projects (name, description, budget, start_date, end_date, actual_end_date, manager_id, status, planned_area_m2, planned_length_ml, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())',
+      [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, manager_id || null, normalizedStatus, resolvedPlannedArea, resolvedPlannedLength]
     );
 
     const generatedOtCode = otCodeFromProjectId(result.insertId);
@@ -269,7 +297,7 @@ const createProject = async (req, res) => {
 const updateProject = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, budget, start_date, end_date, actual_end_date, status, manager_id } = req.body;
+    const { name, description, budget, start_date, end_date, actual_end_date, status, manager_id, planned_area_m2, planned_length_ml } = req.body;
 
     if (!name || !budget) {
       return res.status(400).json({
@@ -282,6 +310,7 @@ const updateProject = async (req, res) => {
     await ensureProjectStatusSchema(connection);
     await ensureProjectOtSchema(connection);
     await ensureProjectActualEndDateSchema(connection);
+    await ensureProjectMeterFieldsSchema(connection);
 
     const normalizedStatus = normalizeProjectStatus(status);
     const [existingRows] = await connection.execute(
@@ -330,11 +359,24 @@ const updateProject = async (req, res) => {
     const resolvedActualEndDate = isFinalStatus(normalizedStatus)
       ? (actual_end_date || existingActualEndDate || todayIsoDate())
       : null;
+    
+    // Safe conversion of meter fields
+    let resolvedPlannedArea = 0;
+    if (planned_area_m2 !== undefined && planned_area_m2 !== null && planned_area_m2 !== '') {
+      const parsed = parseFloat(planned_area_m2);
+      resolvedPlannedArea = isNaN(parsed) ? 0 : Math.max(0, parsed);
+    }
+    
+    let resolvedPlannedLength = 0;
+    if (planned_length_ml !== undefined && planned_length_ml !== null && planned_length_ml !== '') {
+      const parsed = parseFloat(planned_length_ml);
+      resolvedPlannedLength = isNaN(parsed) ? 0 : Math.max(0, parsed);
+    }
 
     await applyAuditContext(connection, req);
     await connection.execute(
-      'UPDATE projects SET name = ?, description = ?, budget = ?, start_date = ?, end_date = ?, actual_end_date = ?, status = ?, manager_id = ?, updated_at = NOW() WHERE id = ?',
-      [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, normalizedStatus, manager_id || null, id]
+      'UPDATE projects SET name = ?, description = ?, budget = ?, start_date = ?, end_date = ?, actual_end_date = ?, status = ?, manager_id = ?, planned_area_m2 = ?, planned_length_ml = ?, updated_at = NOW() WHERE id = ?',
+      [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, normalizedStatus, manager_id || null, resolvedPlannedArea, resolvedPlannedLength, id]
     );
     connection.release();
 

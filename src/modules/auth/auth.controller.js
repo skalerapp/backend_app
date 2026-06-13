@@ -10,6 +10,7 @@ const {
   revokeWebSessionByJwtSessionId,
   getSessionState,
   getAppSessionBridgeOverview,
+  getWebLaunchTicketState,
   touchSession,
   buildLaunchUrl,
   getWebAppUrl,
@@ -71,6 +72,18 @@ const register = async (req, res) => {
 const login = async (req, res) => {
   try {
     await ensureAuthSessionSchema();
+
+    const clientPlatform = (req.headers['x-skaler-client'] || '').toString().trim().toLowerCase();
+    const origin = (req.headers.origin || req.headers.referer || '').toString().toLowerCase();
+    const devLoginRequested = (req.headers['x-skaler-dev-login'] || '').toString().trim().toLowerCase() === 'true';
+    const allowDevWebLogin = process.env.NODE_ENV !== 'production' && devLoginRequested;
+    if ((clientPlatform === 'web' || origin.includes(':8080')) && !allowDevWebLogin) {
+      return res.status(403).json({
+        success: false,
+        message: 'El acceso web solo funciona con un enlace temporal generado desde la app móvil.',
+      });
+    }
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
@@ -338,13 +351,15 @@ const sessionStatus = async (req, res) => {
       return res.json({
         success: true,
         data: {
-          active: true,
+          active: false,
+          reason: 'legacy_session_unsupported',
           sessionType: 'legacy',
+          linkedAppSessionActive: false,
         },
       });
     }
 
-    const state = await getSessionState({ jwtSessionId: sessionId, sessionType });
+    const state = req.sessionState || await getSessionState({ jwtSessionId: sessionId, sessionType });
     const bridgeOverview = state.valid && sessionType === 'app'
       ? await getAppSessionBridgeOverview({ appSessionId: state.appSessionId })
       : null;
@@ -367,12 +382,81 @@ const sessionStatus = async (req, res) => {
   }
 };
 
+const webLaunchTicketMessages = {
+  not_found: 'El enlace temporal no existe o ya no está disponible',
+  ticket_revoked: 'El enlace temporal fue revocado y ya no está disponible',
+  ticket_consumed: 'El enlace temporal ya fue usado',
+  ticket_used_or_revoked: 'El enlace temporal ya fue usado o invalidado',
+  ticket_expired: 'El enlace temporal ya expiró',
+  app_session_revoked: 'La sesión móvil asociada ya no está activa',
+  app_session_expired: 'La sesión móvil asociada ya expiró',
+  app_session_inactive: 'La sesión móvil asociada ya no está activa',
+};
+
+const webLaunchTicketStatus = async (req, res) => {
+  const ticketCode = (req.params.ticket || '').toString().trim();
+  if (!ticketCode) {
+    return res.status(400).json({
+      success: false,
+      message: 'Ticket inválido',
+    });
+  }
+
+  try {
+    const ticketState = await getWebLaunchTicketState({ ticketCode });
+    if (!ticketState.valid) {
+      return res.status(410).json({
+        success: false,
+        message: webLaunchTicketMessages[ticketState.reason] || 'El enlace temporal ya no está disponible',
+        reason: ticketState.reason,
+        data: {
+          ticketStatus: ticketState.ticketStatus || null,
+          valid: false,
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Enlace temporal válido',
+      data: {
+        valid: true,
+        ticketStatus: ticketState.ticketStatus,
+        expiresAt: ticketState.expiresAt || null,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'No fue posible validar el enlace temporal',
+      error: error.message,
+    });
+  }
+};
+
 const previewWebLaunch = async (req, res) => {
   const ticketCode = (req.params.ticket || '').toString().trim();
   if (!ticketCode) {
     return res.status(400).json({
       success: false,
       message: 'Ticket inválido',
+    });
+  }
+
+  try {
+    const ticketState = await getWebLaunchTicketState({ ticketCode });
+    if (!ticketState.valid) {
+      return res.status(410).json({
+        success: false,
+        message: webLaunchTicketMessages[ticketState.reason] || 'El enlace temporal ya no está disponible',
+        reason: ticketState.reason,
+      });
+    }
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'No fue posible validar el enlace temporal',
+      error: error.message,
     });
   }
 
@@ -400,5 +484,6 @@ module.exports = {
   consumeTemporaryWebLaunch,
   heartbeatSession,
   sessionStatus,
+  webLaunchTicketStatus,
   previewWebLaunch,
 };

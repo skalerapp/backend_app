@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "test": "jest --runInBand",
     "db:rebuild:local": "node src/utils/rebuildDatabaseFromSchema.js",
+    "db:reset:admin-only": "node src/utils/rebuildDatabaseFromSchema.js --admin-only",
     "db:schema:sync": "node src/utils/syncCurrentSchema.js",
     "db:schema:export": "node src/utils/exportCurrentSchema.js",
     "db:seed:demo": "node src/utils/seedOperationalDemoData.js",

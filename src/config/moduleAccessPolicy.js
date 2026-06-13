@@ -67,7 +67,7 @@ const MODULE_ACCESS_POLICY = {
   commercial: {
     attendance: ['read', 'create', 'update'],
     projects: ['read'],
-    allowances: ['read'],
+    allowances: ['read', 'create', 'update'],
     commercial: ['read', 'create', 'update'],
   },
   gerencial: {
@@ -77,7 +77,7 @@ const MODULE_ACCESS_POLICY = {
     activities: ['read'],
     allowances: ['read'],
     warehouse: ['read'],
-    commercial: ['read'],
+    commercial: ['read', 'update'],
   },
 };
 

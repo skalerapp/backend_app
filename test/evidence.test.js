@@ -92,6 +92,31 @@ describe('Evidence endpoints', () => {
     expect(res.body.data.some((item) => item.file_name === uploadedFileName)).toBe(true);
   });
 
+  it('POST /api/evidence/upload ignores invalid activity_id for commercial evidence', async () => {
+    const pngBytes = Buffer.from([
+      137, 80, 78, 71, 13, 10, 26, 10,
+      0, 0, 0, 13, 73, 72, 68, 82,
+      0, 0, 0, 1, 0, 0, 0, 1,
+      8, 6, 0, 0, 0, 31, 21, 196,
+      137, 0, 0, 0, 13, 73, 68, 65,
+      84, 120, 156, 99, 248, 255, 255, 63,
+      0, 5, 254, 2, 254, 167, 53, 129,
+      132, 0, 0, 0, 0, 73, 69, 78,
+      68, 174, 66, 96, 130,
+    ]);
+
+    const res = await request(app)
+      .post('/api/evidence/upload')
+      .set('Authorization', `Bearer ${authToken}`)
+      .field('module_type', 'commercial')
+      .field('activity_id', 'commercial-visit-draft')
+      .attach('file', pngBytes, { filename: 'commercial-visit-evidence.png', contentType: 'image/png' });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.success).toBe(true);
+    expect(res.body.file.name).toBe('commercial-visit-evidence.png');
+  });
+
   afterAll(async () => {
     await closeDatabase();
   });
