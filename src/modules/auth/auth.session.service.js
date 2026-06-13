@@ -69,6 +69,12 @@ const getWebAppUrl = () => {
   const dashboardUrl = normalizeUrl(process.env.DASHBOARD_URL);
   if (dashboardUrl) return dashboardUrl;
 
+  // En producción la app web vive en otro host (Firebase, Netlify, etc.).
+  // No reutilizar API_URL: el backend no sirve la UI Flutter.
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    return '';
+  }
+
   const apiUrl = normalizeUrl(process.env.API_URL);
   if (!apiUrl) return '';
 
@@ -156,6 +162,7 @@ const createAppSession = async ({ user, deviceLabel = 'mobile-app' }) => {
 
   const jwtSessionId = createId(24);
   const expiresAt = addMilliseconds(new Date(), appSessionTtlMs());
+  const expiresAtSql = expiresAt.toISOString().slice(0, 19).replace('T', ' ');
 
   const connection = await pool.getConnection();
   try {
@@ -172,7 +179,7 @@ const createAppSession = async ({ user, deviceLabel = 'mobile-app' }) => {
         )
         VALUES (?, ?, ?, ?, ?, NOW(), ?)
       `,
-      [jwtSessionId, user.id, user.role || 'employee', deviceLabel, SESSION_STATUS_ACTIVE, expiresAt],
+      [jwtSessionId, user.id, user.role || 'employee', deviceLabel, SESSION_STATUS_ACTIVE, expiresAtSql],
     );
 
     return {
