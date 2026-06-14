@@ -608,10 +608,12 @@ const touchSession = async ({ jwtSessionId, sessionType }) => {
   }
 };
 
-const getSessionState = async ({ jwtSessionId, sessionType }) => {
+const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => {
   await ensureAuthSessionSchema();
   const connection = await pool.getConnection();
   try {
+    let result;
+
     if (sessionType === 'web') {
       const [rows] = await connection.execute(
         `
@@ -658,42 +660,52 @@ const getSessionState = async ({ jwtSessionId, sessionType }) => {
         return { valid: false, reason: 'app_session_inactive' };
       }
 
-      return {
+      result = {
         valid: true,
         sessionType: 'web',
         appSessionId: item.app_session_id,
       };
+    } else {
+      const [rows] = await connection.execute(
+        `
+          SELECT id, session_status, last_seen_at, expires_at
+          FROM auth_app_sessions
+          WHERE jwt_session_id = ?
+          LIMIT 1
+        `,
+        [jwtSessionId],
+      );
+
+      if (rows.length === 0) {
+        return { valid: false, reason: 'session_not_found' };
+      }
+
+      const item = rows[0];
+      const now = Date.now();
+      const expiresAt = item.expires_at ? new Date(item.expires_at).getTime() : null;
+      if (item.session_status !== SESSION_STATUS_ACTIVE) {
+        return { valid: false, reason: 'session_revoked' };
+      }
+      if (expiresAt != null && expiresAt <= now) {
+        return { valid: false, reason: 'session_expired' };
+      }
+
+      result = {
+        valid: true,
+        sessionType: 'app',
+        appSessionId: item.id,
+      };
     }
 
-    const [rows] = await connection.execute(
-      `
-        SELECT id, session_status, last_seen_at, expires_at
-        FROM auth_app_sessions
-        WHERE jwt_session_id = ?
-        LIMIT 1
-      `,
-      [jwtSessionId],
-    );
-
-    if (rows.length === 0) {
-      return { valid: false, reason: 'session_not_found' };
+    if (touch && result.valid) {
+      const tableName = sessionType === 'web' ? 'auth_web_sessions' : 'auth_app_sessions';
+      await connection.execute(
+        `UPDATE ${tableName} SET last_seen_at = NOW(), updated_at = NOW() WHERE jwt_session_id = ?`,
+        [jwtSessionId],
+      );
     }
 
-    const item = rows[0];
-    const now = Date.now();
-    const expiresAt = item.expires_at ? new Date(item.expires_at).getTime() : null;
-    if (item.session_status !== SESSION_STATUS_ACTIVE) {
-      return { valid: false, reason: 'session_revoked' };
-    }
-    if (expiresAt != null && expiresAt <= now) {
-      return { valid: false, reason: 'session_expired' };
-    }
-
-    return {
-      valid: true,
-      sessionType: 'app',
-      appSessionId: item.id,
-    };
+    return result;
   } finally {
     connection.release();
   }

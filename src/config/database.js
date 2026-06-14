@@ -54,7 +54,7 @@ const dbConfig = {
   password,
   database,
   waitForConnections: true,
-  connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
+  connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 25),
   queueLimit: 0,
   ssl: resolveSslConfig(),
 };

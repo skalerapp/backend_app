@@ -132,6 +132,7 @@ const verifyToken = async (req, res, next) => {
     const sessionState = await getSessionState({
       jwtSessionId: decoded.sid,
       sessionType,
+      touch: true,
     });
 
     if (!sessionState.valid) {
@@ -141,11 +142,6 @@ const verifyToken = async (req, res, next) => {
         reason: sessionState.reason,
       });
     }
-
-    await touchSession({
-      jwtSessionId: decoded.sid,
-      sessionType,
-    });
 
     req.user = decoded;
     next();
