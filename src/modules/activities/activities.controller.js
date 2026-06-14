@@ -161,7 +161,9 @@ const syncLegacyActivityRow = async (connection, activityId) => {
 
   try {
     await connection.execute(
-      'UPDATE activities SET start_time = COALESCE(start_time, created_at, NOW()) WHERE id = ?',
+      `UPDATE activities
+       SET start_time = COALESCE(start_time, NOW())
+       WHERE id = ? AND status IN ('in_progress', 'paused', 'completed', 'cancelled')`,
       [activityId]
     );
   } catch (e) {}
@@ -370,6 +372,8 @@ const updateActivity = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Actividad no encontrada' });
     }
     const existing = rows[0];
+    const previousStatus = normalizeActivityStatus(existing.status);
+    const nextStatus = status !== undefined ? normalizeActivityStatus(status) : previousStatus;
 
     if (normalizedRole === 'leader' || normalizedRole === 'supervisor') {
       const hasProjectAccess = await canAccessProjectByOperationalScope({
@@ -406,11 +410,34 @@ const updateActivity = async (req, res) => {
     const pid = project_id !== undefined ? project_id : existing.project_id;
     const eid = employee_id !== undefined ? employee_id : existing.employee_id;
     const desc = description !== undefined ? description : existing.description;
-    const st = start_time !== undefined ? start_time : existing.start_time;
-    const et = end_time !== undefined ? end_time : existing.end_time;
+    let st = start_time !== undefined ? start_time : existing.start_time;
+    let et = end_time !== undefined ? end_time : existing.end_time;
     const resolvedExecutedArea = executed_area_m2 !== undefined ? Number(executed_area_m2) : Number(existing.executed_area_m2 || 0);
     const resolvedExecutedLength = executed_length_ml !== undefined ? Number(executed_length_ml) : Number(existing.executed_length_ml || 0);
-    const stts = status !== undefined ? normalizeActivityStatus(status) : normalizeActivityStatus(existing.status);
+    const stts = nextStatus;
+
+    if (nextStatus === 'in_progress' && previousStatus !== 'in_progress' && (st == null || st === '')) {
+      await connection.execute(
+        'UPDATE activities SET start_time = NOW() WHERE id = ? AND start_time IS NULL',
+        [id]
+      );
+      const [startedRows] = await connection.execute('SELECT start_time FROM activities WHERE id = ?', [id]);
+      st = startedRows[0]?.start_time ?? st;
+    }
+
+    if (
+      (nextStatus === 'completed' || nextStatus === 'cancelled') &&
+      previousStatus !== 'completed' &&
+      previousStatus !== 'cancelled' &&
+      (et == null || et === '')
+    ) {
+      await connection.execute(
+        'UPDATE activities SET end_time = NOW() WHERE id = ? AND end_time IS NULL',
+        [id]
+      );
+      const [finishedRows] = await connection.execute('SELECT end_time FROM activities WHERE id = ?', [id]);
+      et = finishedRows[0]?.end_time ?? et;
+    }
 
     await applyAuditContext(connection, req);
     await connection.execute(
