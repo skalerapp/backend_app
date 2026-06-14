@@ -538,7 +538,6 @@ const revokeLinkedWebSessions = async ({ appSessionId, reason }) => {
 const revokeAppSessionByJwtSessionId = async ({ jwtSessionId, reason }) => {
   await ensureAuthSessionSchema();
   const connection = await pool.getConnection();
-  let appSessionId = null;
   try {
     const [rows] = await connection.execute(
       'SELECT id FROM auth_app_sessions WHERE jwt_session_id = ? LIMIT 1',
@@ -546,7 +545,7 @@ const revokeAppSessionByJwtSessionId = async ({ jwtSessionId, reason }) => {
     );
     if (rows.length === 0) return false;
 
-    appSessionId = rows[0].id;
+    const appSessionId = rows[0].id;
     await connection.execute(
       `
         UPDATE auth_app_sessions
@@ -555,12 +554,25 @@ const revokeAppSessionByJwtSessionId = async ({ jwtSessionId, reason }) => {
       `,
       [SESSION_STATUS_REVOKED, reason || 'Sesión cerrada desde la app', appSessionId],
     );
+    await connection.execute(
+      `
+        UPDATE auth_web_sessions
+        SET session_status = ?, revoked_at = NOW(), revoked_reason = ?, updated_at = NOW()
+        WHERE app_session_id = ? AND session_status = ?
+      `,
+      [SESSION_STATUS_REVOKED, reason || 'La sesión móvil fue cerrada', appSessionId, SESSION_STATUS_ACTIVE],
+    );
+    await connection.execute(
+      `
+        UPDATE auth_web_launch_tickets
+        SET ticket_status = ?, updated_at = NOW()
+        WHERE app_session_id = ? AND ticket_status IN (?, ?)
+      `,
+      [TICKET_STATUS_REVOKED, appSessionId, TICKET_STATUS_PENDING, TICKET_STATUS_CONSUMED],
+    );
     return true;
   } finally {
     connection.release();
-    if (appSessionId != null) {
-      await revokeLinkedWebSessions({ appSessionId, reason: reason || 'Sesión móvil cerrada' });
-    }
   }
 };
 
