@@ -1,6 +1,17 @@
 const db = require('../../config/database');
 const { applyAuditContext } = require('../../utils/auditContext');
 const { normalizeRole } = require('../../middleware/auth.middleware');
+const {
+  buildVisitOwnerFilter,
+  buildQuotationOwnerFilter,
+  buildOpportunityOwnerFilter,
+  buildCommercialProjectVisibilityFilter,
+  appendSqlFilter,
+  pushFilter,
+  ownsCommercialVisit,
+  ownsCommercialQuotation,
+  ownsCommercialOpportunity,
+} = require('./commercialVisibility.service');
 
 const pool = db.pool;
 
@@ -557,6 +568,8 @@ const listQuotations = async (req, res) => {
       params.push(`%${searchQuery}%`);
     }
 
+    pushFilter(conditions, params, buildQuotationOwnerFilter(req.user?.role, req.user?.id, 'cq'));
+
     if (conditions.length > 0) {
       sql += `WHERE ${conditions.join(' AND ')}\n`;
     }
@@ -590,6 +603,9 @@ const getQuotationById = async (req, res) => {
       LIMIT 1
     `, [id]);
     if (!rows.length) return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    if (!ownsCommercialQuotation(rows[0], req.user?.role, req.user?.id)) {
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    }
     res.json({ success: true, data: mapQuotationRow(rows[0]) });
   } catch (error) {
     console.error('getQuotationById error:', error);
@@ -1524,6 +1540,8 @@ const getCommercialVisits = async (req, res) => {
       params.push(status);
     }
 
+    pushFilter(filters, params, buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv'));
+
     const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
     const [rows] = await connection.execute(
       `${COMMERCIAL_VISIT_SELECT}
@@ -1569,6 +1587,8 @@ const getCommercialOpportunities = async (req, res) => {
       params.push(stage);
     }
 
+    pushFilter(filters, params, buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co'));
+
     const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
     const [rows] = await connection.execute(
       `${COMMERCIAL_OPPORTUNITY_SELECT}
@@ -1595,6 +1615,14 @@ const getCommercialSummary = async (req, res) => {
     await ensureCommercialVisitsTable(connection);
     await ensureCommercialOpportunitiesTable(connection);
 
+    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
+    const opportunityScope = buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co');
+    const quotationScope = buildQuotationOwnerFilter(req.user?.role, req.user?.id, 'cq');
+
+    const visitWhere = appendSqlFilter('', visitScope);
+    const opportunityWhere = appendSqlFilter('', opportunityScope);
+    const quotationWhere = appendSqlFilter('', quotationScope);
+
     const [[visitSummary]] = await connection.execute(
       `SELECT
          COUNT(*) AS total_visits,
@@ -1607,7 +1635,9 @@ const getCommercialSummary = async (req, res) => {
          SUM(CASE WHEN YEAR(visit_date) = YEAR(CURDATE()) AND MONTH(visit_date) = MONTH(CURDATE()) THEN 1 ELSE 0 END) AS current_month_visits,
          COALESCE(SUM(expense_amount), 0) AS total_expenses,
          COALESCE(SUM(CASE WHEN YEAR(visit_date) = YEAR(CURDATE()) AND MONTH(visit_date) = MONTH(CURDATE()) THEN expense_amount ELSE 0 END), 0) AS current_month_expenses
-       FROM commercial_visits`
+       FROM commercial_visits cv
+       ${visitWhere.whereClause}`,
+      visitWhere.params,
     );
 
     const [[opportunitySummary]] = await connection.execute(
@@ -1621,7 +1651,9 @@ const getCommercialSummary = async (req, res) => {
          COALESCE(SUM(CASE WHEN stage NOT IN ('won', 'lost') THEN estimated_value * (probability / 100) ELSE 0 END), 0) AS weighted_pipeline_value,
          SUM(CASE WHEN stage NOT IN ('won', 'lost') AND expected_close_date IS NOT NULL AND expected_close_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS closing_30_days,
          ROUND(AVG(CASE WHEN stage NOT IN ('won', 'lost') THEN probability END), 0) AS average_probability
-       FROM commercial_opportunities`
+       FROM commercial_opportunities co
+       ${opportunityWhere.whereClause}`,
+      opportunityWhere.params,
     );
 
     const [[quotationSummary]] = await connection.execute(
@@ -1630,7 +1662,9 @@ const getCommercialSummary = async (req, res) => {
          SUM(CASE WHEN status = 'cotizado' THEN 1 ELSE 0 END) AS pending_quotations,
          SUM(CASE WHEN status = 'aprobado' THEN 1 ELSE 0 END) AS approved_quotations,
          COALESCE(SUM(budget), 0) AS quotation_budget_total
-       FROM commercial_quotations`
+       FROM commercial_quotations cq
+       ${quotationWhere.whereClause}`,
+      quotationWhere.params,
     );
 
     const [[clientSummary]] = await connection.execute(
@@ -1660,13 +1694,44 @@ const getCommercialBoard = async (req, res) => {
     connection = await pool.getConnection();
     await ensureCommercialSchema(connection);
 
+    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
+    const opportunityScope = buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co');
+    const quotationScope = buildQuotationOwnerFilter(req.user?.role, req.user?.id, 'cq');
+    const projectScope = buildCommercialProjectVisibilityFilter(req.user?.role, req.user?.id, 'p');
+
+    const visitWhere = appendSqlFilter('', visitScope);
+    const opportunityWhere = appendSqlFilter('', opportunityScope);
+    const upcomingActionsWhere = appendSqlFilter(
+      'WHERE cv.next_action_date IS NOT NULL AND cv.status IN (\'planned\', \'follow_up\')',
+      visitScope,
+    );
+    const urgentOpportunitiesWhere = appendSqlFilter(
+      'WHERE co.stage NOT IN (\'won\', \'lost\')',
+      opportunityScope,
+    );
+
+    const visitSubqueryFilter = visitScope.clause ? `AND ${visitScope.clause}` : '';
+    const opportunitySubqueryFilter = opportunityScope.clause ? `AND ${opportunityScope.clause}` : '';
+    const quotationSubqueryFilter = quotationScope.clause ? `AND ${quotationScope.clause}` : '';
+
+    const projectSnapshotConditions = [
+      'COALESCE(v.visit_count, 0) + COALESCE(o.opportunity_count, 0) + COALESCE(q.quotation_count, 0) > 0',
+    ];
+    const projectSnapshotParams = [];
+    if (projectScope.clause) {
+      projectSnapshotConditions.push(projectScope.clause);
+      projectSnapshotParams.push(...projectScope.params);
+    }
+
     const [[visitAlerts]] = await connection.execute(
       `SELECT
          SUM(CASE WHEN status = 'follow_up' AND next_action_date IS NOT NULL AND next_action_date < CURDATE() THEN 1 ELSE 0 END) AS overdue_follow_ups,
          SUM(CASE WHEN status = 'planned' AND visit_date = CURDATE() THEN 1 ELSE 0 END) AS visits_today,
          SUM(CASE WHEN status IN ('planned', 'follow_up') THEN 1 ELSE 0 END) AS active_pipeline,
          SUM(CASE WHEN evidence_path IS NULL OR evidence_path = '' THEN 1 ELSE 0 END) AS missing_evidence
-       FROM commercial_visits`
+       FROM commercial_visits cv
+       ${visitWhere.whereClause}`,
+      visitWhere.params,
     );
 
     const [[opportunityAlerts]] = await connection.execute(
@@ -1676,49 +1741,57 @@ const getCommercialBoard = async (req, res) => {
          SUM(CASE WHEN stage NOT IN ('won', 'lost') AND expected_close_date IS NOT NULL AND expected_close_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS closing_this_week,
          SUM(CASE WHEN stage = 'won' AND updated_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS won_last_30_days,
          SUM(CASE WHEN stage NOT IN ('won', 'lost') AND (last_activity_date IS NULL OR last_activity_date < DATE_SUB(CURDATE(), INTERVAL 14 DAY)) THEN 1 ELSE 0 END) AS stalled_opportunities
-       FROM commercial_opportunities`
+       FROM commercial_opportunities co
+       ${opportunityWhere.whereClause}`,
+      opportunityWhere.params,
     );
 
     const [topClients] = await connection.execute(
       `SELECT
-         client_name,
+         cv.client_name,
          COUNT(*) AS visit_count,
-         COALESCE(SUM(expense_amount), 0) AS total_expense,
-         MAX(visit_date) AS last_visit_date,
-         SUM(CASE WHEN status = 'follow_up' THEN 1 ELSE 0 END) AS follow_up_count
-       FROM commercial_visits
-       GROUP BY client_name
+         COALESCE(SUM(cv.expense_amount), 0) AS total_expense,
+         MAX(cv.visit_date) AS last_visit_date,
+         SUM(CASE WHEN cv.status = 'follow_up' THEN 1 ELSE 0 END) AS follow_up_count
+       FROM commercial_visits cv
+       ${visitWhere.whereClause}
+       GROUP BY cv.client_name
        ORDER BY visit_count DESC, total_expense DESC, last_visit_date DESC
-       LIMIT 5`
+       LIMIT 5`,
+      visitWhere.params,
     );
 
     const [upcomingActions] = await connection.execute(
       `${COMMERCIAL_VISIT_SELECT}
-       WHERE cv.next_action_date IS NOT NULL AND cv.status IN ('planned', 'follow_up')
+       ${upcomingActionsWhere.whereClause}
        ORDER BY cv.next_action_date ASC, cv.visit_date DESC
-       LIMIT 6`
+       LIMIT 6`,
+      upcomingActionsWhere.params,
     );
 
     const [opportunityStageSummary] = await connection.execute(
       `SELECT
-         stage,
+         co.stage,
          COUNT(*) AS opportunity_count,
-         COALESCE(SUM(estimated_value), 0) AS estimated_value,
-         COALESCE(SUM(estimated_value * (probability / 100)), 0) AS weighted_value,
-         ROUND(AVG(probability), 0) AS avg_probability
-       FROM commercial_opportunities
-       GROUP BY stage
-       ORDER BY FIELD(stage, 'lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost', 'on_hold')`
+         COALESCE(SUM(co.estimated_value), 0) AS estimated_value,
+         COALESCE(SUM(co.estimated_value * (co.probability / 100)), 0) AS weighted_value,
+         ROUND(AVG(co.probability), 0) AS avg_probability
+       FROM commercial_opportunities co
+       ${opportunityWhere.whereClause}
+       GROUP BY co.stage
+       ORDER BY FIELD(co.stage, 'lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost', 'on_hold')`,
+      opportunityWhere.params,
     );
 
     const [urgentOpportunities] = await connection.execute(
       `${COMMERCIAL_OPPORTUNITY_SELECT}
-       WHERE co.stage NOT IN ('won', 'lost')
+       ${urgentOpportunitiesWhere.whereClause}
        ORDER BY CASE WHEN co.expected_close_date IS NOT NULL AND co.expected_close_date < CURDATE() THEN 0 ELSE 1 END,
                 COALESCE(co.expected_close_date, '9999-12-31') ASC,
                 co.probability DESC,
                 co.updated_at DESC
-       LIMIT 6`
+       LIMIT 6`,
+      urgentOpportunitiesWhere.params,
     );
 
     const [projectCommercialSnapshot] = await connection.execute(
@@ -1731,29 +1804,35 @@ const getCommercialBoard = async (req, res) => {
          COALESCE(o.pipeline_value, 0) AS pipeline_value
        FROM projects p
        LEFT JOIN (
-         SELECT project_id, COUNT(*) AS visit_count
-         FROM commercial_visits
-         WHERE project_id IS NOT NULL
-         GROUP BY project_id
+         SELECT cv.project_id, COUNT(*) AS visit_count
+         FROM commercial_visits cv
+         WHERE cv.project_id IS NOT NULL ${visitSubqueryFilter}
+         GROUP BY cv.project_id
        ) v ON v.project_id = p.id
        LEFT JOIN (
          SELECT
-           project_id,
+           co.project_id,
            COUNT(*) AS opportunity_count,
-           COALESCE(SUM(CASE WHEN stage NOT IN ('won', 'lost') THEN estimated_value ELSE 0 END), 0) AS pipeline_value
-         FROM commercial_opportunities
-         WHERE project_id IS NOT NULL
-         GROUP BY project_id
+           COALESCE(SUM(CASE WHEN co.stage NOT IN ('won', 'lost') THEN co.estimated_value ELSE 0 END), 0) AS pipeline_value
+         FROM commercial_opportunities co
+         WHERE co.project_id IS NOT NULL ${opportunitySubqueryFilter}
+         GROUP BY co.project_id
        ) o ON o.project_id = p.id
        LEFT JOIN (
-         SELECT project_id, COUNT(*) AS quotation_count
-         FROM commercial_quotations
-         WHERE project_id IS NOT NULL
-         GROUP BY project_id
+         SELECT cq.project_id, COUNT(*) AS quotation_count
+         FROM commercial_quotations cq
+         WHERE cq.project_id IS NOT NULL ${quotationSubqueryFilter}
+         GROUP BY cq.project_id
        ) q ON q.project_id = p.id
-       WHERE COALESCE(v.visit_count, 0) + COALESCE(o.opportunity_count, 0) + COALESCE(q.quotation_count, 0) > 0
+       WHERE ${projectSnapshotConditions.join(' AND ')}
        ORDER BY pipeline_value DESC, visit_count DESC, quotation_count DESC
-       LIMIT 8`
+       LIMIT 8`,
+      [
+        ...visitScope.params,
+        ...opportunityScope.params,
+        ...quotationScope.params,
+        ...projectSnapshotParams,
+      ],
     );
 
     let geoAudit = [];
@@ -1834,19 +1913,27 @@ const getCommercialClientHistory = async (req, res) => {
     await ensureCommercialSchema(connection);
 
     const clientKey = normalizeClientMatchKey(clientName);
+    const visitFilters = ['LOWER(TRIM(cv.client_name)) = ?'];
+    const visitParams = [clientKey];
+    pushFilter(visitFilters, visitParams, buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv'));
+
+    const opportunityFilters = ['LOWER(TRIM(co.client_name)) = ?'];
+    const opportunityParams = [clientKey];
+    pushFilter(opportunityFilters, opportunityParams, buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co'));
+
     const [visitRows] = await connection.execute(
       `${COMMERCIAL_VISIT_SELECT}
-       WHERE LOWER(TRIM(cv.client_name)) = ?
+       WHERE ${visitFilters.join(' AND ')}
        ORDER BY cv.visit_date DESC, cv.created_at DESC`,
-      [clientKey],
+      visitParams,
     );
     const [opportunityRows] = await connection.execute(
       `${COMMERCIAL_OPPORTUNITY_SELECT}
-       WHERE LOWER(TRIM(co.client_name)) = ?
+       WHERE ${opportunityFilters.join(' AND ')}
        ORDER BY FIELD(co.stage, 'negotiation', 'proposal', 'qualified', 'lead', 'on_hold', 'won', 'lost'),
                 COALESCE(co.expected_close_date, '9999-12-31') ASC,
                 co.updated_at DESC`,
-      [clientKey],
+      opportunityParams,
     );
 
     const visits = visitRows.map((row) => mapVisitRow(row, req));
@@ -2062,6 +2149,10 @@ const updateCommercialVisit = async (req, res) => {
     }
 
     const existing = existingRows[0];
+    if (!ownsCommercialVisit(existing, req.user?.role, req.user?.id)) {
+      return res.status(404).json({ success: false, message: 'Visita comercial no encontrada' });
+    }
+
     const nextStatus = req.body.status == null ? existing.status : normalizeStatus(req.body.status);
     const nextVisitDate = req.body.visit_date == null ? existing.visit_date : normalizeDate(req.body.visit_date);
     const nextLatitude = req.body.latitude == null ? normalizeNumber(existing.latitude) : normalizeNumber(req.body.latitude);
@@ -2189,6 +2280,23 @@ const listCommercialClients = async (req, res) => {
       params.push(like, like, like);
     }
 
+    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
+    if (visitScope.clause) {
+      filters.push(`(
+        cc.id IN (
+          SELECT DISTINCT cv.client_id
+          FROM commercial_visits cv
+          WHERE cv.client_id IS NOT NULL AND ${visitScope.clause}
+        )
+        OR LOWER(TRIM(cc.business_name)) IN (
+          SELECT DISTINCT LOWER(TRIM(cv.client_name))
+          FROM commercial_visits cv
+          WHERE ${visitScope.clause}
+        )
+      )`);
+      params.push(...visitScope.params, ...visitScope.params);
+    }
+
     const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
     const [rows] = await connection.execute(
       `SELECT * FROM commercial_clients ${whereClause} ORDER BY business_name ASC, city ASC LIMIT 100`,
@@ -2217,6 +2325,25 @@ const getCommercialClientById = async (req, res) => {
     const [rows] = await connection.execute('SELECT * FROM commercial_clients WHERE id = ? LIMIT 1', [clientId]);
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Cliente comercial no encontrado' });
+    }
+
+    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
+    if (visitScope.clause) {
+      const client = rows[0];
+      const [accessRows] = await connection.execute(
+        `SELECT cv.id
+         FROM commercial_visits cv
+         WHERE ${visitScope.clause}
+           AND (
+             cv.client_id = ?
+             OR LOWER(TRIM(cv.client_name)) = LOWER(TRIM(?))
+           )
+         LIMIT 1`,
+        [...visitScope.params, clientId, client.business_name],
+      );
+      if (!accessRows.length) {
+        return res.status(404).json({ success: false, message: 'Cliente comercial no encontrado' });
+      }
     }
 
     res.json({ success: true, data: mapCommercialClientRow(rows[0]) });
@@ -2556,6 +2683,10 @@ const updateCommercialOpportunity = async (req, res) => {
     }
 
     const existing = existingRows[0];
+    if (!ownsCommercialOpportunity(existing, req.user?.role, req.user?.id)) {
+      return res.status(404).json({ success: false, message: 'Oportunidad comercial no encontrada' });
+    }
+
     const nextStage = req.body.stage == null ? existing.stage : normalizeOpportunityStage(req.body.stage);
     const nextEstimatedValue = req.body.estimated_value == null ? (normalizeNumber(existing.estimated_value) ?? 0) : (normalizeNumber(req.body.estimated_value) ?? 0);
     const nextProbability = req.body.probability == null

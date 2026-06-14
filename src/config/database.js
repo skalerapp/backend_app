@@ -61,8 +61,13 @@ const dbConfig = {
   password,
   database,
   waitForConnections: true,
-  connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 25),
-  queueLimit: 0,
+  connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
+  queueLimit: Number(process.env.DB_QUEUE_LIMIT || 0),
+  acquireTimeout: Number(process.env.DB_ACQUIRE_TIMEOUT_MS || 15000),
+  maxIdle: Number(process.env.DB_MAX_IDLE || 10),
+  idleTimeout: Number(process.env.DB_IDLE_TIMEOUT_MS || 60000),
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 0,
   ssl: resolveSslConfig(),
 };
 const pool = connectionString.length > 0

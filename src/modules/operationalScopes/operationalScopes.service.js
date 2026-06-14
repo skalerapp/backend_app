@@ -1,4 +1,8 @@
 const { normalizeRole } = require('../../middleware/auth.middleware');
+const {
+  buildCommercialProjectVisibilityFilter,
+  canAccessProjectAsCommercial,
+} = require('../commercial/commercialVisibility.service');
 
 const ensureOperationalScopeShape = async (connection) => {
   await connection.execute(`
@@ -55,6 +59,10 @@ const buildOperationalVisibilityFilter = ({ normalizedRole, userId, projectAlias
     };
   }
 
+  if (role === 'commercial') {
+    return buildCommercialProjectVisibilityFilter(role, userId, projectAlias);
+  }
+
   return { clause: null, params: [] };
 };
 
@@ -69,6 +77,10 @@ const canAccessProjectByOperationalScope = async ({ connection, userId, role, pr
     normalizedRole === 'gerencial'
   ) {
     return true;
+  }
+
+  if (normalizedRole === 'commercial') {
+    return canAccessProjectAsCommercial({ connection, userId, projectId });
   }
 
   if (normalizedRole !== 'leader') {

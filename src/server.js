@@ -89,7 +89,16 @@ app.get('/api/health/db', async (req, res) => {
     const { pool } = require('./config/database');
     connection = await pool.getConnection();
     await connection.query('SELECT 1');
-    res.json({ success: true, message: 'Base de datos conectada' });
+    res.json({
+      success: true,
+      message: 'Base de datos conectada',
+      pool: {
+        connectionLimit: pool.config?.connectionLimit,
+        activeConnections: pool.pool?._allConnections?.length ?? null,
+        idleConnections: pool.pool?._freeConnections?.length ?? null,
+        queuedRequests: pool.pool?._connectionQueue?.length ?? null,
+      },
+    });
   } catch (error) {
     res.status(503).json({
       success: false,

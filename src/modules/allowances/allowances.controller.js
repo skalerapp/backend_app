@@ -7,6 +7,17 @@ const {
   canAccessProjectByOperationalScope,
 } = require('../operationalScopes/operationalScopes.service');
 
+const withAllowanceConnection = async (handler) => {
+  const connection = await pool.getConnection();
+  try {
+    await ensureAllowancesShape(connection);
+    await ensureOperationalScopeShape(connection);
+    return await handler(connection);
+  } finally {
+    connection.release();
+  }
+};
+
 const isFinalProjectStatus = (statusValue) => {
   const normalized = (statusValue || '').toString().trim().toLowerCase();
   return normalized === 'completed' || normalized === 'cancelled' || normalized === 'closed';
@@ -548,77 +559,75 @@ const canCommercialAccessAllowanceProject = async (connection, userId, projectId
 
 const listAllowances = async (req, res) => {
   try {
-    const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
-    await ensureOperationalScopeShape(connection);
+    const enrichedRows = await withAllowanceConnection(async (connection) => {
+      const normalizedRole = normalizeRole(req.user?.role);
 
-    const normalizedRole = normalizeRole(req.user?.role);
+      const conditions = [];
+      const params = [];
 
-    const conditions = [];
-    const params = [];
+      if (normalizedRole === 'commercial') {
+        conditions.push(`(
+          pa.leader_user_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM allowance_requests ar
+            WHERE ar.project_id = pa.project_id
+              AND ar.status = 'approved'
+              AND ar.applied_to_allowance_at IS NOT NULL
+              AND (ar.requester_user_id = ? OR ar.responsible_user_id = ?)
+          )
+        )`);
+        params.push(req.user.id, req.user.id, req.user.id);
+      } else if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
+        conditions.push(`(
+          EXISTS (
+            SELECT 1
+            FROM operational_role_assignments ora
+            WHERE ora.project_id = p.id
+              AND ora.user_id = ?
+              AND ora.role_scope = ?
+              AND ora.is_active = 1
+          )
+          OR pa.leader_user_id = ?
+        )`);
+        params.push(req.user.id, normalizedRole, req.user.id);
+      } else if (normalizedRole === 'employee') {
+        conditions.push('1 = 0');
+      }
 
-    if (normalizedRole === 'commercial') {
-      await repairApprovedRequestsWithoutAllowance(connection, { userId: req.user.id });
-      conditions.push(`(
-        pa.leader_user_id = ?
-        OR EXISTS (
-          SELECT 1
-          FROM allowance_requests ar
-          WHERE ar.project_id = pa.project_id
-            AND ar.status = 'approved'
-            AND ar.applied_to_allowance_at IS NOT NULL
-            AND (ar.requester_user_id = ? OR ar.responsible_user_id = ?)
-        )
-      )`);
-      params.push(req.user.id, req.user.id, req.user.id);
-    } else if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
-      conditions.push(`(
-        EXISTS (
-          SELECT 1
-          FROM operational_role_assignments ora
-          WHERE ora.project_id = p.id
-            AND ora.user_id = ?
-            AND ora.role_scope = ?
-            AND ora.is_active = 1
-        )
-        OR pa.leader_user_id = ?
-      )`);
-      params.push(req.user.id, normalizedRole, req.user.id);
-    } else if (normalizedRole === 'employee') {
-      conditions.push('1 = 0');
-    }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const [rows] = await connection.execute(`
+        SELECT
+          pa.id,
+          pa.project_id,
+          p.name AS project_name,
+          p.status AS project_status,
+          pa.leader_user_id,
+          u.name AS leader_name,
+          pa.assigned_amount,
+          COALESCE(SUM(ae.amount), 0) AS spent_amount,
+          (pa.assigned_amount - COALESCE(SUM(ae.amount), 0)) AS remaining_amount,
+          pa.updated_at
+        FROM project_allowances pa
+        INNER JOIN projects p ON p.id = pa.project_id
+        LEFT JOIN users u ON u.id = pa.leader_user_id
+        LEFT JOIN allowance_expenses ae ON ae.allowance_id = pa.id
+        ${where}
+        GROUP BY pa.id
+        ORDER BY pa.updated_at DESC
+      `, params);
 
-    const [rows] = await connection.execute(`
-      SELECT
-        pa.id,
-        pa.project_id,
-        p.name AS project_name,
-        p.status AS project_status,
-        pa.leader_user_id,
-        u.name AS leader_name,
-        pa.assigned_amount,
-        COALESCE(SUM(ae.amount), 0) AS spent_amount,
-        (pa.assigned_amount - COALESCE(SUM(ae.amount), 0)) AS remaining_amount,
-        pa.updated_at
-      FROM project_allowances pa
-      INNER JOIN projects p ON p.id = pa.project_id
-      LEFT JOIN users u ON u.id = pa.leader_user_id
-      LEFT JOIN allowance_expenses ae ON ae.allowance_id = pa.id
-      ${where}
-      GROUP BY pa.id
-      ORDER BY pa.updated_at DESC
-    `, params);
+      return rows.map((row) => ({
+        ...row,
+        request_buckets: [],
+        legacy_project_spent: 0,
+      }));
+    });
 
-    const enrichedRows = [];
-    for (const row of rows) {
-      enrichedRows.push(await enrichAllowanceSummary(connection, row));
-    }
-
-    connection.release();
     res.json({ success: true, data: enrichedRows });
   } catch (error) {
+    console.error('listAllowances error:', error);
     res.status(500).json({ success: false, message: 'Error al listar viáticos', error: error.message });
   }
 };
@@ -626,42 +635,48 @@ const listAllowances = async (req, res) => {
 const getAllowanceByProject = async (req, res) => {
   try {
     const { projectId } = req.params;
-    const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
-    await ensureOperationalScopeShape(connection);
 
-    const normalizedRole = normalizeRole(req.user?.role);
-    if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
-      const hasProjectAccess = await canAccessProjectByOperationalScope({
-        connection,
-        userId: req.user.id,
-        role: normalizedRole,
-        projectId: Number(projectId),
-      });
+    const data = await withAllowanceConnection(async (connection) => {
+      const normalizedRole = normalizeRole(req.user?.role);
+      if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
+        const hasProjectAccess = await canAccessProjectByOperationalScope({
+          connection,
+          userId: req.user.id,
+          role: normalizedRole,
+          projectId: Number(projectId),
+        });
 
-      if (!hasProjectAccess) {
-        connection.release();
-        return res.status(403).json({ success: false, message: 'No tienes acceso operativo a este proyecto' });
+        if (!hasProjectAccess) {
+          const error = new Error('No tienes acceso operativo a este proyecto');
+          error.statusCode = 403;
+          throw error;
+        }
       }
-    }
 
-    if (normalizedRole === 'employee') {
-      connection.release();
-      return res.status(403).json({ success: false, message: 'Acceso denegado' });
-    }
+      if (normalizedRole === 'employee') {
+        const error = new Error('Acceso denegado');
+        error.statusCode = 403;
+        throw error;
+      }
 
-    await repairApprovedRequestsWithoutAllowance(connection, { projectId: Number(projectId) });
+      await repairApprovedRequestsWithoutAllowance(connection, { projectId: Number(projectId) });
 
-    const summary = await getAllowanceSummaryByProject(connection, projectId);
-    if (!summary) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'No hay viático asignado para este proyecto' });
-    }
+      const summary = await getAllowanceSummaryByProject(connection, projectId);
+      if (!summary) {
+        const error = new Error('No hay viático asignado para este proyecto');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    const data = await enrichAllowanceSummary(connection, summary);
-    connection.release();
+      return enrichAllowanceSummary(connection, summary);
+    });
+
     res.json({ success: true, data });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
+    console.error('getAllowanceByProject error:', error);
     res.status(500).json({ success: false, message: 'Error al obtener viático del proyecto', error: error.message });
   }
 };
@@ -675,38 +690,39 @@ const assignAllowance = async (req, res) => {
       return res.status(400).json({ success: false, message: 'project_id y assigned_amount válidos son requeridos' });
     }
 
-    const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
+    const rows = await withAllowanceConnection(async (connection) => {
+      const [projectRows] = await connection.execute('SELECT id, status FROM projects WHERE id = ? LIMIT 1', [project_id]);
+      if (!projectRows.length) {
+        const error = new Error('Proyecto no encontrado');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    const [projectRows] = await connection.execute('SELECT id, status FROM projects WHERE id = ? LIMIT 1', [project_id]);
-    if (!projectRows.length) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Proyecto no encontrado' });
-    }
+      if (isFinalProjectStatus(projectRows[0].status)) {
+        const error = new Error('No se puede asignar viático a un proyecto finalizado');
+        error.statusCode = 409;
+        throw error;
+      }
 
-    if (isFinalProjectStatus(projectRows[0].status)) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'No se puede asignar viático a un proyecto finalizado',
-      });
-    }
+      await applyAuditContext(connection, req);
+      await connection.execute(`
+        INSERT INTO project_allowances (project_id, leader_user_id, assigned_amount, created_at, updated_at)
+        VALUES (?, ?, ?, NOW(), NOW())
+        ON DUPLICATE KEY UPDATE
+          leader_user_id = VALUES(leader_user_id),
+          assigned_amount = VALUES(assigned_amount),
+          updated_at = NOW()
+      `, [project_id, leader_user_id || null, normalizedAmount]);
 
-    await applyAuditContext(connection, req);
-    await connection.execute(`
-      INSERT INTO project_allowances (project_id, leader_user_id, assigned_amount, created_at, updated_at)
-      VALUES (?, ?, ?, NOW(), NOW())
-      ON DUPLICATE KEY UPDATE
-        leader_user_id = VALUES(leader_user_id),
-        assigned_amount = VALUES(assigned_amount),
-        updated_at = NOW()
-    `, [project_id, leader_user_id || null, normalizedAmount]);
+      return [await getAllowanceSummaryByProject(connection, project_id)];
+    });
 
-    const rows = [await getAllowanceSummaryByProject(connection, project_id)];
-
-    connection.release();
     res.json({ success: true, message: 'Viático asignado/actualizado', data: rows[0] });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
+    console.error('assignAllowance error:', error);
     res.status(500).json({ success: false, message: 'Error al asignar viático', error: error.message });
   }
 };
@@ -722,138 +738,136 @@ const addExpense = async (req, res) => {
       return res.status(400).json({ success: false, message: 'amount debe ser mayor a 0' });
     }
 
-    const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
-    await ensureOperationalScopeShape(connection);
-
-    const normalizedRole = normalizeRole(req.user?.role);
-    if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
-      const hasProjectAccess = await canAccessProjectByOperationalScope({
-        connection,
-        userId: req.user.id,
-        role: normalizedRole,
-        projectId: Number(projectId),
-      });
-
-      if (!hasProjectAccess) {
-        connection.release();
-        return res.status(403).json({ success: false, message: 'No tienes acceso operativo a este proyecto' });
-      }
-    }
-
-    if (normalizedRole === 'employee') {
-      connection.release();
-      return res.status(403).json({ success: false, message: 'Acceso denegado' });
-    }
-
-    if (normalizedRole === 'commercial') {
-      const canAccess = await canCommercialAccessAllowanceProject(connection, req.user.id, Number(projectId));
-      if (!canAccess) {
-        connection.release();
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes acceso para registrar gastos en esta bolsa comercial',
+    const result = await withAllowanceConnection(async (connection) => {
+      const normalizedRole = normalizeRole(req.user?.role);
+      if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
+        const hasProjectAccess = await canAccessProjectByOperationalScope({
+          connection,
+          userId: req.user.id,
+          role: normalizedRole,
+          projectId: Number(projectId),
         });
-      }
-    }
 
-    const [allowanceRows] = await connection.execute(
-      'SELECT id, assigned_amount FROM project_allowances WHERE project_id = ? LIMIT 1',
-      [projectId]
-    );
-
-    if (!allowanceRows.length) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Primero asigna un viático al proyecto' });
-    }
-
-    const allowance = allowanceRows[0];
-    const [spentRows] = await connection.execute(
-      'SELECT COALESCE(SUM(amount), 0) AS spent_amount FROM allowance_expenses WHERE allowance_id = ?',
-      [allowance.id]
-    );
-
-    const [approvedRequestRows] = await connection.execute(
-      `SELECT COUNT(*) AS total
-       FROM allowance_requests
-       WHERE project_id = ?
-         AND status = 'approved'
-         AND applied_to_allowance_at IS NOT NULL`,
-      [projectId]
-    );
-
-    if (Number(approvedRequestRows[0]?.total || 0) > 0 && !normalizedRequestId) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'Selecciona la solicitud aprobada contra la que vas a registrar este gasto',
-      });
-    }
-
-    const spent = Number(spentRows[0].spent_amount || 0);
-    const remaining = Number(allowance.assigned_amount || 0) - spent;
-
-    if (normalizedAmount > remaining) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: `El gasto excede el saldo disponible (${remaining.toFixed(2)})`
-      });
-    }
-
-    let requestBucket = null;
-    if (normalizedRequestId) {
-      requestBucket = await getAllowanceRequestBucket(connection, Number(projectId), normalizedRequestId);
-
-      if (!requestBucket) {
-        connection.release();
-        return res.status(404).json({ success: false, message: 'La solicitud aprobada seleccionada no existe para este proyecto' });
+        if (!hasProjectAccess) {
+          const error = new Error('No tienes acceso operativo a este proyecto');
+          error.statusCode = 403;
+          throw error;
+        }
       }
 
-      if (normalizeAllowanceRequestStatus(requestBucket.status) !== 'approved' || !requestBucket.applied_to_allowance_at) {
-        connection.release();
-        return res.status(409).json({
-          success: false,
-          message: 'Solo puedes registrar gastos sobre solicitudes aprobadas y ya aplicadas al viático',
-        });
+      if (normalizedRole === 'employee') {
+        const error = new Error('Acceso denegado');
+        error.statusCode = 403;
+        throw error;
       }
 
-      const requestRemaining = Number(requestBucket.remaining_amount || 0);
-      if (normalizedAmount > requestRemaining) {
-        connection.release();
-        return res.status(409).json({
-          success: false,
-          message: `El gasto excede el saldo disponible de la solicitud aprobada (${requestRemaining.toFixed(2)})`,
-        });
+      if (normalizedRole === 'commercial') {
+        const canAccess = await canCommercialAccessAllowanceProject(connection, req.user.id, Number(projectId));
+        if (!canAccess) {
+          const error = new Error('No tienes acceso para registrar gastos en esta bolsa comercial');
+          error.statusCode = 403;
+          throw error;
+        }
       }
-    }
 
-    const expenseDate = (expense_date && expense_date.toString().trim())
-      ? expense_date.toString().trim().slice(0, 10)
-      : new Date().toISOString().slice(0, 10);
+      const [allowanceRows] = await connection.execute(
+        'SELECT id, assigned_amount FROM project_allowances WHERE project_id = ? LIMIT 1',
+        [projectId]
+      );
 
-    const createdBy = req.user?.id || null;
+      if (!allowanceRows.length) {
+        const error = new Error('Primero asigna un viático al proyecto');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    await applyAuditContext(connection, req);
-    const [insertRes] = await connection.execute(
-      `INSERT INTO allowance_expenses
-       (allowance_id, allowance_request_id, amount, expense_date, notes, evidence_path, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [allowance.id, normalizedRequestId, normalizedAmount, expenseDate, notes || null, evidence_path || null, createdBy]
-    );
+      const allowance = allowanceRows[0];
+      const [spentRows] = await connection.execute(
+        'SELECT COALESCE(SUM(amount), 0) AS spent_amount FROM allowance_expenses WHERE allowance_id = ?',
+        [allowance.id]
+      );
 
-    const summaryRow = await getAllowanceSummaryByProject(connection, Number(projectId));
-    const summary = await enrichAllowanceSummary(connection, summaryRow);
+      const [approvedRequestRows] = await connection.execute(
+        `SELECT COUNT(*) AS total
+         FROM allowance_requests
+         WHERE project_id = ?
+           AND status = 'approved'
+           AND applied_to_allowance_at IS NOT NULL`,
+        [projectId]
+      );
 
-    connection.release();
+      if (Number(approvedRequestRows[0]?.total || 0) > 0 && !normalizedRequestId) {
+        const error = new Error('Selecciona la solicitud aprobada contra la que vas a registrar este gasto');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const spent = Number(spentRows[0].spent_amount || 0);
+      const remaining = Number(allowance.assigned_amount || 0) - spent;
+
+      if (normalizedAmount > remaining) {
+        const error = new Error(`El gasto excede el saldo disponible (${remaining.toFixed(2)})`);
+        error.statusCode = 409;
+        throw error;
+      }
+
+      if (normalizedRequestId) {
+        const requestBucket = await getAllowanceRequestBucket(connection, Number(projectId), normalizedRequestId);
+
+        if (!requestBucket) {
+          const error = new Error('La solicitud aprobada seleccionada no existe para este proyecto');
+          error.statusCode = 404;
+          throw error;
+        }
+
+        if (normalizeAllowanceRequestStatus(requestBucket.status) !== 'approved' || !requestBucket.applied_to_allowance_at) {
+          const error = new Error('Solo puedes registrar gastos sobre solicitudes aprobadas y ya aplicadas al viático');
+          error.statusCode = 409;
+          throw error;
+        }
+
+        const requestRemaining = Number(requestBucket.remaining_amount || 0);
+        if (normalizedAmount > requestRemaining) {
+          const error = new Error(`El gasto excede el saldo disponible de la solicitud aprobada (${requestRemaining.toFixed(2)})`);
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+
+      const expenseDate = (expense_date && expense_date.toString().trim())
+        ? expense_date.toString().trim().slice(0, 10)
+        : new Date().toISOString().slice(0, 10);
+
+      const createdBy = req.user?.id || null;
+
+      await applyAuditContext(connection, req);
+      const [insertRes] = await connection.execute(
+        `INSERT INTO allowance_expenses
+         (allowance_id, allowance_request_id, amount, expense_date, notes, evidence_path, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [allowance.id, normalizedRequestId, normalizedAmount, expenseDate, notes || null, evidence_path || null, createdBy]
+      );
+
+      const summaryRow = await getAllowanceSummaryByProject(connection, Number(projectId));
+      const summary = await enrichAllowanceSummary(connection, summaryRow);
+
+      return {
+        expenseId: insertRes.insertId,
+        summary,
+      };
+    });
 
     res.status(201).json({
       success: true,
       message: 'Gasto registrado y descontado del viático',
-      expenseId: insertRes.insertId,
-      summary
+      expenseId: result.expenseId,
+      summary: result.summary,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
+    console.error('addExpense error:', error);
     res.status(500).json({ success: false, message: 'Error al registrar gasto de viático', error: error.message });
   }
 };
@@ -870,104 +884,104 @@ const reclassifyExpenseToRequest = async (req, res) => {
       });
     }
 
-    const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
-    await ensureOperationalScopeShape(connection);
+    const summary = await withAllowanceConnection(async (connection) => {
+      const normalizedRole = normalizeRole(req.user?.role);
+      if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
+        const hasProjectAccess = await canAccessProjectByOperationalScope({
+          connection,
+          userId: req.user.id,
+          role: normalizedRole,
+          projectId: Number(projectId),
+        });
 
-    const normalizedRole = normalizeRole(req.user?.role);
-    if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
-      const hasProjectAccess = await canAccessProjectByOperationalScope({
-        connection,
-        userId: req.user.id,
-        role: normalizedRole,
-        projectId: Number(projectId),
-      });
-
-      if (!hasProjectAccess) {
-        connection.release();
-        return res.status(403).json({ success: false, message: 'No tienes acceso operativo a este proyecto' });
+        if (!hasProjectAccess) {
+          const error = new Error('No tienes acceso operativo a este proyecto');
+          error.statusCode = 403;
+          throw error;
+        }
       }
-    }
 
-    if (normalizedRole === 'employee') {
-      connection.release();
-      return res.status(403).json({ success: false, message: 'Acceso denegado' });
-    }
+      if (normalizedRole === 'employee') {
+        const error = new Error('Acceso denegado');
+        error.statusCode = 403;
+        throw error;
+      }
 
-    const [allowanceRows] = await connection.execute(
-      'SELECT id FROM project_allowances WHERE project_id = ? LIMIT 1',
-      [projectId]
-    );
+      const [allowanceRows] = await connection.execute(
+        'SELECT id FROM project_allowances WHERE project_id = ? LIMIT 1',
+        [projectId]
+      );
 
-    if (!allowanceRows.length) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'No hay viático asignado para este proyecto' });
-    }
+      if (!allowanceRows.length) {
+        const error = new Error('No hay viático asignado para este proyecto');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    const allowanceId = allowanceRows[0].id;
-    const [expenseRows] = await connection.execute(
-      `SELECT id, allowance_id, allowance_request_id, amount
-       FROM allowance_expenses
-       WHERE id = ?
-         AND allowance_id = ?
-       LIMIT 1`,
-      [expenseId, allowanceId]
-    );
+      const allowanceId = allowanceRows[0].id;
+      const [expenseRows] = await connection.execute(
+        `SELECT id, allowance_id, allowance_request_id, amount
+         FROM allowance_expenses
+         WHERE id = ?
+           AND allowance_id = ?
+         LIMIT 1`,
+        [expenseId, allowanceId]
+      );
 
-    if (!expenseRows.length) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Gasto de viático no encontrado para este proyecto' });
-    }
+      if (!expenseRows.length) {
+        const error = new Error('Gasto de viático no encontrado para este proyecto');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    const expenseRow = expenseRows[0];
-    if (normalizeInteger(expenseRow.allowance_request_id)) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'Este gasto ya está asociado a una solicitud aprobada',
-      });
-    }
+      const expenseRow = expenseRows[0];
+      if (normalizeInteger(expenseRow.allowance_request_id)) {
+        const error = new Error('Este gasto ya está asociado a una solicitud aprobada');
+        error.statusCode = 409;
+        throw error;
+      }
 
-    const requestBucket = await getAllowanceRequestBucket(connection, Number(projectId), targetRequestId);
-    if (!requestBucket) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'La solicitud aprobada seleccionada no existe para este proyecto' });
-    }
+      const requestBucket = await getAllowanceRequestBucket(connection, Number(projectId), targetRequestId);
+      if (!requestBucket) {
+        const error = new Error('La solicitud aprobada seleccionada no existe para este proyecto');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    if (normalizeAllowanceRequestStatus(requestBucket.status) !== 'approved' || !requestBucket.applied_to_allowance_at) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'Solo puedes reclasificar a solicitudes aprobadas y ya aplicadas al viático',
-      });
-    }
+      if (normalizeAllowanceRequestStatus(requestBucket.status) !== 'approved' || !requestBucket.applied_to_allowance_at) {
+        const error = new Error('Solo puedes reclasificar a solicitudes aprobadas y ya aplicadas al viático');
+        error.statusCode = 409;
+        throw error;
+      }
 
-    if (Number(expenseRow.amount || 0) > Number(requestBucket.remaining_amount || 0)) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: `El gasto excede el saldo disponible de la solicitud aprobada (${Number(requestBucket.remaining_amount || 0).toFixed(2)})`,
-      });
-    }
+      if (Number(expenseRow.amount || 0) > Number(requestBucket.remaining_amount || 0)) {
+        const error = new Error(`El gasto excede el saldo disponible de la solicitud aprobada (${Number(requestBucket.remaining_amount || 0).toFixed(2)})`);
+        error.statusCode = 409;
+        throw error;
+      }
 
-    await applyAuditContext(connection, req);
-    await connection.execute(
-      `UPDATE allowance_expenses
-       SET allowance_request_id = ?
-       WHERE id = ?`,
-      [targetRequestId, expenseId]
-    );
+      await applyAuditContext(connection, req);
+      await connection.execute(
+        `UPDATE allowance_expenses
+         SET allowance_request_id = ?
+         WHERE id = ?`,
+        [targetRequestId, expenseId]
+      );
 
-    const summaryRow = await getAllowanceSummaryByProject(connection, Number(projectId));
-    const summary = await enrichAllowanceSummary(connection, summaryRow);
+      const summaryRow = await getAllowanceSummaryByProject(connection, Number(projectId));
+      return enrichAllowanceSummary(connection, summaryRow);
+    });
 
-    connection.release();
     res.json({
       success: true,
       message: 'Gasto reclasificado a la solicitud aprobada',
       summary,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
+    console.error('reclassifyExpenseToRequest error:', error);
     res.status(500).json({ success: false, message: 'Error al reclasificar gasto de viático', error: error.message });
   }
 };
@@ -975,107 +989,107 @@ const reclassifyExpenseToRequest = async (req, res) => {
 const listExpensesByProject = async (req, res) => {
   try {
     const { projectId } = req.params;
-    const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
-    await ensureOperationalScopeShape(connection);
 
-    const normalizedRole = normalizeRole(req.user?.role);
-    if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
-      const hasProjectAccess = await canAccessProjectByOperationalScope({
-        connection,
-        userId: req.user.id,
-        role: normalizedRole,
-        projectId: Number(projectId),
-      });
+    const rows = await withAllowanceConnection(async (connection) => {
+      const normalizedRole = normalizeRole(req.user?.role);
+      if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
+        const hasProjectAccess = await canAccessProjectByOperationalScope({
+          connection,
+          userId: req.user.id,
+          role: normalizedRole,
+          projectId: Number(projectId),
+        });
 
-      if (!hasProjectAccess) {
-        connection.release();
-        return res.status(403).json({ success: false, message: 'No tienes acceso operativo a este proyecto' });
+        if (!hasProjectAccess) {
+          const error = new Error('No tienes acceso operativo a este proyecto');
+          error.statusCode = 403;
+          throw error;
+        }
       }
-    }
 
-    if (normalizedRole === 'employee') {
-      connection.release();
-      return res.status(403).json({ success: false, message: 'Acceso denegado' });
-    }
+      if (normalizedRole === 'employee') {
+        const error = new Error('Acceso denegado');
+        error.statusCode = 403;
+        throw error;
+      }
 
-    const [allowanceRows] = await connection.execute(
-      'SELECT id FROM project_allowances WHERE project_id = ? LIMIT 1',
-      [projectId]
-    );
+      const [allowanceRows] = await connection.execute(
+        'SELECT id FROM project_allowances WHERE project_id = ? LIMIT 1',
+        [projectId]
+      );
 
-    if (!allowanceRows.length) {
-      connection.release();
-      return res.json({ success: true, data: [] });
-    }
+      if (!allowanceRows.length) {
+        return [];
+      }
 
-    const [rows] = await connection.execute(
-      `SELECT
-         ae.*,
-         ar.total_requested AS request_approved_amount,
-         ar.city AS request_city,
-         ar.departure_date AS request_departure_date,
-         ar.return_date AS request_return_date,
-         requester.name AS request_requester_name,
-         responsible.name AS request_responsible_name
-       FROM allowance_expenses ae
-       LEFT JOIN allowance_requests ar ON ar.id = ae.allowance_request_id
-       LEFT JOIN users requester ON requester.id = ar.requester_user_id
-       LEFT JOIN users responsible ON responsible.id = ar.responsible_user_id
-       WHERE ae.allowance_id = ?
-       ORDER BY ae.created_at DESC`,
-      [allowanceRows[0].id]
-    );
+      const [expenseRows] = await connection.execute(
+        `SELECT
+           ae.*,
+           ar.total_requested AS request_approved_amount,
+           ar.city AS request_city,
+           ar.departure_date AS request_departure_date,
+           ar.return_date AS request_return_date,
+           requester.name AS request_requester_name,
+           responsible.name AS request_responsible_name
+         FROM allowance_expenses ae
+         LEFT JOIN allowance_requests ar ON ar.id = ae.allowance_request_id
+         LEFT JOIN users requester ON requester.id = ar.requester_user_id
+         LEFT JOIN users responsible ON responsible.id = ar.responsible_user_id
+         WHERE ae.allowance_id = ?
+         ORDER BY ae.created_at DESC`,
+        [allowanceRows[0].id]
+      );
 
-    connection.release();
+      return expenseRows;
+    });
+
     res.json({ success: true, data: rows });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
+    console.error('listExpensesByProject error:', error);
     res.status(500).json({ success: false, message: 'Error al listar gastos de viático', error: error.message });
   }
 };
 
 const listAllowanceRequests = async (req, res) => {
   try {
-    const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
-    await ensureOperationalScopeShape(connection);
+    const rows = await withAllowanceConnection(async (connection) => {
+      const normalizedRole = normalizeRole(req.user?.role);
+      const conditions = [];
+      const params = [];
 
-    const normalizedRole = normalizeRole(req.user?.role);
-    const conditions = [];
-    const params = [];
+      if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
+        conditions.push(`(
+          EXISTS (
+            SELECT 1
+            FROM operational_role_assignments ora
+            WHERE ora.project_id = ar.project_id
+              AND ora.user_id = ?
+              AND ora.role_scope = ?
+              AND ora.is_active = 1
+          )
+          OR ar.requester_user_id = ?
+          OR ar.responsible_user_id = ?
+        )`);
+        params.push(req.user.id, normalizedRole, req.user.id, req.user.id);
+      } else if (normalizedRole === 'commercial' || normalizedRole === 'employee') {
+        conditions.push('(ar.requester_user_id = ? OR ar.responsible_user_id = ?)');
+        params.push(req.user.id, req.user.id);
+      }
 
-    if (normalizedRole === 'commercial' || normalizedRole === 'employee') {
-      await repairApprovedRequestsWithoutAllowance(connection, { userId: req.user.id });
-    }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const [requestRows] = await connection.execute(
+        `${allowanceRequestSelect} ${where} ORDER BY ar.created_at DESC LIMIT 80`,
+        params
+      );
+      return requestRows;
+    });
 
-    if (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations') {
-      conditions.push(`(
-        EXISTS (
-          SELECT 1
-          FROM operational_role_assignments ora
-          WHERE ora.project_id = ar.project_id
-            AND ora.user_id = ?
-            AND ora.role_scope = ?
-            AND ora.is_active = 1
-        )
-        OR ar.requester_user_id = ?
-        OR ar.responsible_user_id = ?
-      )`);
-      params.push(req.user.id, normalizedRole, req.user.id, req.user.id);
-    } else if (normalizedRole === 'commercial' || normalizedRole === 'employee') {
-      conditions.push('(ar.requester_user_id = ? OR ar.responsible_user_id = ?)');
-      params.push(req.user.id, req.user.id);
-    }
-
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    const [rows] = await connection.execute(
-      `${allowanceRequestSelect} ${where} ORDER BY ar.created_at DESC LIMIT 80`,
-      params
-    );
-
-    connection.release();
     res.json({ success: true, data: rows });
   } catch (error) {
+    console.error('listAllowanceRequests error:', error);
     res.status(500).json({ success: false, message: 'Error al listar solicitudes de viáticos', error: error.message });
   }
 };
@@ -1148,41 +1162,39 @@ const createAllowanceRequest = async (req, res) => {
     }
 
     const connection = await pool.getConnection();
-    await ensureAllowancesShape(connection);
-    await ensureOperationalScopeShape(connection);
+    try {
+      await ensureAllowancesShape(connection);
+      await ensureOperationalScopeShape(connection);
 
-    if (payload.project_id) {
-      const [projectRows] = await connection.execute('SELECT id, name, status FROM projects WHERE id = ? LIMIT 1', [payload.project_id]);
-      if (!projectRows.length) {
-        connection.release();
-        return res.status(404).json({ success: false, message: 'Proyecto no encontrado' });
+      if (payload.project_id) {
+        const [projectRows] = await connection.execute('SELECT id, name, status FROM projects WHERE id = ? LIMIT 1', [payload.project_id]);
+        if (!projectRows.length) {
+          return res.status(404).json({ success: false, message: 'Proyecto no encontrado' });
+        }
+
+        if (isFinalProjectStatus(projectRows[0].status)) {
+          return res.status(409).json({
+            success: false,
+            message: 'No se puede crear una solicitud sobre un proyecto finalizado',
+          });
+        }
       }
 
-      if (isFinalProjectStatus(projectRows[0].status)) {
-        connection.release();
-        return res.status(409).json({
-          success: false,
-          message: 'No se puede crear una solicitud sobre un proyecto finalizado',
+      if (payload.project_id && (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations')) {
+        const hasProjectAccess = await canAccessProjectByOperationalScope({
+          connection,
+          userId: req.user.id,
+          role: normalizedRole,
+          projectId: Number(payload.project_id),
         });
+
+        if (!hasProjectAccess) {
+          return res.status(403).json({ success: false, message: 'No tienes acceso operativo a este proyecto' });
+        }
       }
-    }
 
-    if (payload.project_id && (normalizedRole === 'supervisor' || normalizedRole === 'leader' || normalizedRole === 'coordinator_operations')) {
-      const hasProjectAccess = await canAccessProjectByOperationalScope({
-        connection,
-        userId: req.user.id,
-        role: normalizedRole,
-        projectId: Number(payload.project_id),
-      });
-
-      if (!hasProjectAccess) {
-        connection.release();
-        return res.status(403).json({ success: false, message: 'No tienes acceso operativo a este proyecto' });
-      }
-    }
-
-    await applyAuditContext(connection, req);
-    const [result] = await connection.execute(
+      await applyAuditContext(connection, req);
+      const [result] = await connection.execute(
       `INSERT INTO allowance_requests (
         project_id,
         requester_user_id,
@@ -1249,14 +1261,17 @@ const createAllowanceRequest = async (req, res) => {
       ]
     );
 
-    const request = await getAllowanceRequestById(connection, result.insertId);
-    connection.release();
-    res.status(201).json({
-      success: true,
-      message: 'Solicitud de viáticos creada',
-      data: request,
-    });
+      const request = await getAllowanceRequestById(connection, result.insertId);
+      res.status(201).json({
+        success: true,
+        message: 'Solicitud de viáticos creada',
+        data: request,
+      });
+    } finally {
+      connection.release();
+    }
   } catch (error) {
+    console.error('createAllowanceRequest error:', error);
     res.status(500).json({ success: false, message: 'Error al crear solicitud de viáticos', error: error.message });
   }
 };
@@ -1345,7 +1360,6 @@ const updateAllowanceRequestStatus = async (req, res) => {
       const refreshedRequest = await getAllowanceRequestById(connection, requestId);
       if (!refreshedRequest?.applied_to_allowance_at) {
         await connection.rollback();
-        connection.release();
         return res.status(409).json({
           success: false,
           message: 'La solicitud no pudo aplicarse al viático del proyecto. Verifica que el proyecto exista y tenga un monto válido.',

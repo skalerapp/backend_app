@@ -136,8 +136,9 @@ const getNextOtCode = async (req, res) => {
 
 // Obtener todos los proyectos
 const getProjects = async (req, res) => {
+  let connection;
   try {
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
     await ensureProjectCollaboratorsSchema(connection);
     await ensureProjectStatusSchema(connection);
     await ensureProjectOtSchema(connection);
@@ -164,7 +165,6 @@ const getProjects = async (req, res) => {
        ORDER BY p.created_at DESC`,
       visibility.params
     );
-    connection.release();
 
     res.json({
       success: true,
@@ -176,14 +176,17 @@ const getProjects = async (req, res) => {
       message: 'Error al obtener proyectos',
       error: error.message
     });
+  } finally {
+    connection?.release();
   }
 };
 
 // Obtener proyecto por ID
 const getProjectById = async (req, res) => {
+  let connection;
   try {
     const { id } = req.params;
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
     await ensureProjectCollaboratorsSchema(connection);
     await ensureProjectStatusSchema(connection);
     await ensureProjectOtSchema(connection);
@@ -210,7 +213,6 @@ const getProjectById = async (req, res) => {
        GROUP BY p.id`,
       [id, ...visibility.params]
     );
-    connection.release();
 
     if (projects.length === 0) {
       return res.status(404).json({
@@ -229,6 +231,8 @@ const getProjectById = async (req, res) => {
       message: 'Error al obtener proyecto',
       error: error.message
     });
+  } finally {
+    connection?.release();
   }
 };
 
