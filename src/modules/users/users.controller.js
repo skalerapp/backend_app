@@ -156,19 +156,23 @@ const ensureUsersRoleSchema = async (providedConnection) => {
 
 // Obtener todos los usuarios
 const getUsers = async (req, res) => {
+  let connection;
   try {
     await ensureUsersRoleSchema();
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
     const [users] = await connection.execute(
       'SELECT id, email, name, role, status FROM users WHERE status = ? ORDER BY name ASC',
       ['active']
     );
-    connection.release();
 
     res.json({ success: true, data: users.map(toApiUser) });
   } catch (error) {
     console.error('getUsers error:', error);
     res.status(500).json({ success: false, message: 'Error al obtener usuarios', error: error.message });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 };
 
@@ -219,43 +223,44 @@ const createUser = async (req, res) => {
       });
     }
 
-    const connection = await pool.getConnection();
     await ensureUsersRoleSchema();
 
-    const [existingRows] = await connection.execute(
-      'SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1',
-      [normalizedEmail]
-    );
-    if (existingRows.length > 0) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'Ya existe un usuario con ese correo',
+    const connection = await pool.getConnection();
+    try {
+      const [existingRows] = await connection.execute(
+        'SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1',
+        [normalizedEmail]
+      );
+      if (existingRows.length > 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'Ya existe un usuario con ese correo',
+        });
+      }
+
+      const hashedPassword = await hashPassword(password.toString());
+
+      const storageRole = roleToStorageValue(normalizedRole);
+      await applyAuditContext(connection, req);
+
+      const [result] = await connection.execute(
+        'INSERT INTO users (email, password, name, role, status, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
+        [normalizedEmail, hashedPassword, normalizedName, storageRole, 'active']
+      );
+
+      const [rows] = await connection.execute(
+        'SELECT id, email, name, role, status FROM users WHERE id = ? LIMIT 1',
+        [result.insertId]
+      );
+
+      res.status(201).json({
+        success: true,
+        message: 'Usuario creado correctamente',
+        data: toApiUser(rows[0]),
       });
+    } finally {
+      connection.release();
     }
-
-    const hashedPassword = await hashPassword(password.toString());
-
-    const storageRole = roleToStorageValue(normalizedRole);
-    await applyAuditContext(connection, req);
-
-    const [result] = await connection.execute(
-      'INSERT INTO users (email, password, name, role, status, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
-      [normalizedEmail, hashedPassword, normalizedName, storageRole, 'active']
-    );
-
-    const [rows] = await connection.execute(
-      'SELECT id, email, name, role, status FROM users WHERE id = ? LIMIT 1',
-      [result.insertId]
-    );
-
-    connection.release();
-
-    res.status(201).json({
-      success: true,
-      message: 'Usuario creado correctamente',
-      data: toApiUser(rows[0]),
-    });
   } catch (error) {
     console.error('createUser error:', error);
     res.status(500).json({
@@ -334,60 +339,60 @@ const updateUser = async (req, res) => {
       });
     }
 
-    const connection = await pool.getConnection();
     await ensureUsersRoleSchema();
 
-    const [existingRows] = await connection.execute(
-      'SELECT id FROM users WHERE id = ? LIMIT 1',
-      [userId]
-    );
-    if (existingRows.length === 0) {
-      connection.release();
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado',
-      });
-    }
-
-    const [emailRows] = await connection.execute(
-      'SELECT id FROM users WHERE LOWER(email) = ? AND id <> ? LIMIT 1',
-      [normalizedEmail, userId]
-    );
-    if (emailRows.length > 0) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'Ya existe otro usuario con ese correo',
-      });
-    }
-
-    if (normalizedPassword.length > 0) {
-      await applyAuditContext(connection, req);
-      const hashedPassword = await hashPassword(normalizedPassword);
-      await connection.execute(
-        'UPDATE users SET email = ?, name = ?, role = ?, status = ?, password = ? WHERE id = ?',
-        [normalizedEmail, normalizedName, storageRole, normalizedStatus, hashedPassword, userId]
+    const connection = await pool.getConnection();
+    try {
+      const [existingRows] = await connection.execute(
+        'SELECT id FROM users WHERE id = ? LIMIT 1',
+        [userId]
       );
-    } else {
-      await applyAuditContext(connection, req);
-      await connection.execute(
-        'UPDATE users SET email = ?, name = ?, role = ?, status = ? WHERE id = ?',
-        [normalizedEmail, normalizedName, storageRole, normalizedStatus, userId]
+      if (existingRows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Usuario no encontrado',
+        });
+      }
+
+      const [emailRows] = await connection.execute(
+        'SELECT id FROM users WHERE LOWER(email) = ? AND id <> ? LIMIT 1',
+        [normalizedEmail, userId]
       );
+      if (emailRows.length > 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'Ya existe otro usuario con ese correo',
+        });
+      }
+
+      if (normalizedPassword.length > 0) {
+        await applyAuditContext(connection, req);
+        const hashedPassword = await hashPassword(normalizedPassword);
+        await connection.execute(
+          'UPDATE users SET email = ?, name = ?, role = ?, status = ?, password = ? WHERE id = ?',
+          [normalizedEmail, normalizedName, storageRole, normalizedStatus, hashedPassword, userId]
+        );
+      } else {
+        await applyAuditContext(connection, req);
+        await connection.execute(
+          'UPDATE users SET email = ?, name = ?, role = ?, status = ? WHERE id = ?',
+          [normalizedEmail, normalizedName, storageRole, normalizedStatus, userId]
+        );
+      }
+
+      const [rows] = await connection.execute(
+        'SELECT id, email, name, role, status FROM users WHERE id = ? LIMIT 1',
+        [userId]
+      );
+
+      res.json({
+        success: true,
+        message: 'Usuario actualizado correctamente',
+        data: toApiUser(rows[0]),
+      });
+    } finally {
+      connection.release();
     }
-
-    const [rows] = await connection.execute(
-      'SELECT id, email, name, role, status FROM users WHERE id = ? LIMIT 1',
-      [userId]
-    );
-
-    connection.release();
-
-    res.json({
-      success: true,
-      message: 'Usuario actualizado correctamente',
-      data: toApiUser(rows[0]),
-    });
   } catch (error) {
     console.error('updateUser error:', error);
     res.status(500).json({

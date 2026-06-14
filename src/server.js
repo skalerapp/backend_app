@@ -84,11 +84,11 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/health/db', async (req, res) => {
+  let connection;
   try {
     const { pool } = require('./config/database');
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
     await connection.query('SELECT 1');
-    connection.release();
     res.json({ success: true, message: 'Base de datos conectada' });
   } catch (error) {
     res.status(503).json({
@@ -96,6 +96,10 @@ app.get('/api/health/db', async (req, res) => {
       message: 'No se pudo conectar a la base de datos',
       error: error?.message || String(error),
     });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 });
 

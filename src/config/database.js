@@ -19,11 +19,18 @@ const resolveHostFromConnectionString = (uri = '') => {
   }
 };
 
-const connectionString =
-  process.env.DATABASE_URL ||
-  process.env.MYSQL_URL ||
-  process.env.MYSQL_PUBLIC_URL ||
-  '';
+const hasRailwayMysqlVars = Boolean(
+  (process.env.MYSQLHOST || process.env.MYSQLUSER || process.env.MYSQLPASSWORD || '').toString().trim(),
+);
+
+const connectionString = hasRailwayMysqlVars
+  ? ''
+  : (
+    process.env.DATABASE_URL ||
+    process.env.MYSQL_URL ||
+    process.env.MYSQL_PUBLIC_URL ||
+    ''
+  ).toString().trim();
 
 const host = process.env.MYSQLHOST || process.env.DB_HOST || 'localhost';
 const port = Number(process.env.MYSQLPORT || process.env.DB_PORT || 3306);
@@ -31,7 +38,7 @@ const user = process.env.MYSQLUSER || process.env.DB_USER || 'root';
 const password = process.env.MYSQLPASSWORD || process.env.DB_PASSWORD || '';
 const database = process.env.MYSQLDATABASE || process.env.DB_NAME || 'skaler_db';
 
-const resolvedHost = connectionString.trim().length > 0
+const resolvedHost = connectionString.length > 0
   ? resolveHostFromConnectionString(connectionString)
   : host;
 
@@ -58,8 +65,8 @@ const dbConfig = {
   queueLimit: 0,
   ssl: resolveSslConfig(),
 };
-const pool = connectionString.trim().length > 0
-  ? mysql.createPool(connectionString.trim())
+const pool = connectionString.length > 0
+  ? mysql.createPool(connectionString)
   : mysql.createPool(dbConfig);
 
 // ✅ función para probar conexión (NO automática)
