@@ -1,4 +1,5 @@
 const { pool } = require('../../config/database');
+const { withConnection } = require('../../utils/withConnection');
 const { hashPassword, comparePassword, generateToken } = require('../../utils/auth.utils');
 const { validationResult } = require('express-validator');
 const {
@@ -26,32 +27,30 @@ const register = async (req, res) => {
 
     const { email, password, name, role } = req.body;
 
-    const connection = await pool.getConnection();
-
-    // Verificar si el usuario ya existe
-    const [existingUser] = await connection.execute(
-      'SELECT * FROM users WHERE email = ?',
-      [email]
-    );
+    const existingUser = await withConnection(pool, async (connection) => {
+      const [rows] = await connection.execute(
+        'SELECT * FROM users WHERE email = ?',
+        [email]
+      );
+      return rows;
+    });
 
     if (existingUser.length > 0) {
-      connection.release();
       return res.status(400).json({
         success: false,
         message: 'El usuario ya existe'
       });
     }
 
-    // Encriptar contraseña
     const hashedPassword = await hashPassword(password);
 
-    // Crear usuario
-    const [result] = await connection.execute(
-      'INSERT INTO users (email, password, name, role, created_at) VALUES (?, ?, ?, ?, NOW())',
-      [email, hashedPassword, name, role || 'employee']
-    );
-
-    connection.release();
+    const result = await withConnection(pool, async (connection) => {
+      const [insertResult] = await connection.execute(
+        'INSERT INTO users (email, password, name, role, created_at) VALUES (?, ?, ?, ?, NOW())',
+        [email, hashedPassword, name, role || 'employee']
+      );
+      return insertResult;
+    });
 
     res.status(201).json({
       success: true,
@@ -99,17 +98,16 @@ const login = async (req, res) => {
       });
     }
 
-    const connection = await pool.getConnection();
-
-    const [users] = await connection.execute(
-      `SELECT *
-       FROM users
-       WHERE LOWER(email) = ? OR LOWER(name) = ?
-       LIMIT 1`,
-      [identifier, identifier]
-    );
-
-    connection.release();
+    const users = await withConnection(pool, async (connection) => {
+      const [rows] = await connection.execute(
+        `SELECT *
+         FROM users
+         WHERE LOWER(email) = ? OR LOWER(name) = ?
+         LIMIT 1`,
+        [identifier, identifier]
+      );
+      return rows;
+    });
 
     if (users.length === 0) {
       return res.status(401).json({
