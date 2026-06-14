@@ -49,8 +49,10 @@ const warehouseRoutes = require('./modules/warehouse/warehouse.routes');
 const operationalScopesRoutes = require('./modules/operationalScopes/operationalScopes.routes');
 const auditRoutes = require('./modules/audit/audit.routes');
 const commercialRoutes = require('./modules/commercial/commercial.routes');
+const hseRoutes = require('./modules/hse/hse.routes');
+const tasksRoutes = require('./modules/tasks/tasks.routes');
+const performanceRoutes = require('./modules/performance/performance.routes');
 // const operativeRoutes = require('./modules/operative/operative.routes');
-// const hseRoutes = require('./modules/hse/hse.routes');
 
 const app = express();
 
@@ -126,10 +128,12 @@ app.use('/api/operational-scopes', operationalScopesRoutes);
 app.use('/api/audit-logs', auditRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/commercial', commercialRoutes);
+app.use('/api/hse', hseRoutes);
+app.use('/api/tasks', tasksRoutes);
+app.use('/api/performance-evaluations', performanceRoutes);
 const evidenceRoutes = require('./modules/evidence/evidence.routes');
 app.use('/api/evidence', evidenceRoutes);
 // app.use('/api/operative', operativeRoutes);
-// app.use('/api/hse', hseRoutes);
 
 // Manejo de errores
 app.use((err, req, res, next) => {

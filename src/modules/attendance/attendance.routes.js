@@ -4,6 +4,7 @@ const attendanceController = require('./attendance.controller');
 const { verifyToken, verifyModuleAccess } = require('../../middleware/auth.middleware');
 
 router.get('/export/report', verifyToken, verifyModuleAccess('attendance', 'read'), attendanceController.exportAttendanceReport);
+router.get('/productivity/summary', verifyToken, verifyModuleAccess('attendance', 'read'), attendanceController.getProductivitySummary);
 router.get('/', verifyToken, verifyModuleAccess('attendance', 'read'), attendanceController.getAttendance);
 router.get('/:id', verifyToken, verifyModuleAccess('attendance', 'read'), attendanceController.getAttendanceById);
 router.post('/check-in', verifyToken, verifyModuleAccess('attendance', 'create'), attendanceController.checkInAttendance);

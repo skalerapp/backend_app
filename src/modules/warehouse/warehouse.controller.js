@@ -276,6 +276,21 @@ const createMovement = async (req, res) => {
       return res.status(400).json({ success: false, message: 'asset_id y movement_type son requeridos' });
     }
 
+    const sessionUserId = Number(req.user?.id || 0);
+    const sessionUserName = (req.user?.name || '').toString().trim();
+    if (sessionUserId <= 0) {
+      throw new HttpError(401, 'Sesión inválida para registrar el movimiento');
+    }
+
+    const delivererMovementTypes = new Set(['delivery', 'assignment']);
+    const resolvedResponsibleUserId = sessionUserId;
+    const resolvedDeliverySignatureName = delivererMovementTypes.has(normalizedMovementType)
+      ? sessionUserName || null
+      : delivery_signature_name || null;
+    const resolvedDeliverySignatureData = delivererMovementTypes.has(normalizedMovementType)
+      ? null
+      : delivery_signature_data || null;
+
     await withDbConnection(async (connection) => {
       await ensureWarehouseShape(connection);
 
@@ -370,8 +385,8 @@ const createMovement = async (req, res) => {
           evidence_path || null,
           quantity || null,
           serial_snapshot || null,
-          delivery_signature_name || null,
-          delivery_signature_data || null,
+          resolvedDeliverySignatureName,
+          resolvedDeliverySignatureData,
           receiving_signature_name || null,
           receiving_signature_data || null,
           vehicle_plate_snapshot || null,
@@ -382,7 +397,7 @@ const createMovement = async (req, res) => {
           normalizedIntakeOriginProjectId,
           status_snapshot || null,
           city_snapshot || null,
-          responsible_user_id || null,
+          resolvedResponsibleUserId,
           receiver_user_id || null,
           notes || null,
         ]

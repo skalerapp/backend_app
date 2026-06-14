@@ -12,6 +12,9 @@ const MODULE_ACCESS_POLICY = {
     warehouse: ['read', 'create', 'update', 'delete'],
     commercial: ['read', 'create', 'update', 'delete'],
     operational_scopes: ['read', 'create', 'update', 'delete'],
+    hse: ['read', 'create', 'update', 'delete'],
+    tasks: ['read', 'create', 'update', 'delete'],
+    performance: ['read', 'create', 'update', 'delete'],
     dashboard: ['read'],
   },
   administrative: {
@@ -27,6 +30,9 @@ const MODULE_ACCESS_POLICY = {
     warehouse: ['read', 'create', 'update', 'delete'],
     commercial: ['read', 'create', 'update', 'delete'],
     operational_scopes: ['read', 'create', 'update', 'delete'],
+    hse: ['read', 'create', 'update', 'delete'],
+    tasks: ['read', 'create', 'update', 'delete'],
+    performance: ['read', 'create', 'update', 'delete'],
     dashboard: ['read'],
   },
   coordinator_operations: {
@@ -37,6 +43,9 @@ const MODULE_ACCESS_POLICY = {
     allowances: ['read'],
     warehouse: ['read', 'create', 'update'],
     commercial: ['read', 'create', 'update'],
+    hse: ['read', 'create', 'update'],
+    tasks: ['read', 'create', 'update', 'delete'],
+    performance: ['read', 'create', 'update'],
   },
   supervisor: {
     projects: ['read'],
@@ -46,6 +55,9 @@ const MODULE_ACCESS_POLICY = {
     materials: ['read', 'create', 'update'],
     warehouse: ['read', 'create', 'update'],
     commercial: ['read', 'create', 'update'],
+    hse: ['read', 'create', 'update'],
+    tasks: ['read', 'create', 'update'],
+    performance: ['read', 'create', 'update'],
   },
   leader: {
     projects: ['read'],
@@ -55,10 +67,15 @@ const MODULE_ACCESS_POLICY = {
     materials: ['read', 'create', 'update'],
     warehouse: ['read', 'create', 'update'],
     commercial: ['read', 'create', 'update'],
+    hse: ['read', 'create', 'update'],
+    tasks: ['read', 'create', 'update'],
+    performance: ['read', 'create', 'update'],
   },
   employee: {
     attendance: ['read', 'create', 'update'],
     activities: ['read'],
+    hse: ['read', 'create'],
+    tasks: ['read', 'update'],
   },
   warehouse_logistics: {
     attendance: ['read', 'create', 'update'],
@@ -78,6 +95,9 @@ const MODULE_ACCESS_POLICY = {
     allowances: ['read'],
     warehouse: ['read'],
     commercial: ['read', 'update'],
+    hse: ['read'],
+    tasks: ['read'],
+    performance: ['read'],
   },
 };
 

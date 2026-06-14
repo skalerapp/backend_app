@@ -84,6 +84,19 @@ const ensureAttendanceShape = async (connection) => {
   try {
     await connection.execute('ALTER TABLE attendance ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
   } catch (e) {}
+  try {
+    await connection.execute("ALTER TABLE attendance ADD COLUMN time_category VARCHAR(30) NOT NULL DEFAULT 'productive'");
+  } catch (e) {}
+  try {
+    await connection.execute('ALTER TABLE attendance ADD COLUMN unproductive_reason VARCHAR(255) NULL');
+  } catch (e) {}
+};
+
+const normalizeTimeCategory = (value) => {
+  const raw = (value || 'productive').toString().trim().toLowerCase();
+  if (raw === 'unproductive' || raw === 'improductivo') return 'unproductive';
+  if (raw === 'neutral' || raw === 'neutro') return 'neutral';
+  return 'productive';
 };
 
 const ATTENDANCE_SELECT_FIELDS = `
@@ -101,6 +114,8 @@ const ATTENDANCE_SELECT_FIELDS = `
     a.attendance_date,
     a.photo_path,
     a.checkout_photo_path,
+    a.time_category,
+    a.unproductive_reason,
     a.created_at,
     a.updated_at,
     p.name AS project_name,
@@ -483,7 +498,7 @@ const checkInAttendance = async (req, res) => {
 const checkOutAttendance = async (req, res) => {
   try {
     const { id } = req.params;
-    const { location_latitude, location_longitude, photo_path } = req.body;
+    const { location_latitude, location_longitude, photo_path, time_category, unproductive_reason } = req.body;
 
     await withDbConnection(async (connection) => {
       await ensureAttendanceShape(connection);
@@ -543,18 +558,26 @@ const checkOutAttendance = async (req, res) => {
       }
 
       await applyAuditContext(connection, req);
+      const normalizedCategory = normalizeTimeCategory(time_category || existing.time_category);
+      const normalizedReason = normalizedCategory === 'unproductive'
+        ? (unproductive_reason || existing.unproductive_reason || null)
+        : null;
       await connection.execute(
         `UPDATE attendance
          SET check_out = NOW(),
              checkout_location_latitude = ?,
              checkout_location_longitude = ?,
              checkout_photo_path = ?,
+             time_category = ?,
+             unproductive_reason = ?,
              updated_at = NOW()
          WHERE id = ?`,
         [
           location_latitude ?? existing.checkout_location_latitude,
           location_longitude ?? existing.checkout_location_longitude,
           photo_path ?? existing.checkout_photo_path,
+          normalizedCategory,
+          normalizedReason,
           id
         ]
       );
@@ -566,12 +589,129 @@ const checkOutAttendance = async (req, res) => {
   }
 };
 
+const getProductivitySummary = async (req, res) => {
+  try {
+    const projectId = req.query.project_id ? Number(req.query.project_id) : null;
+    const dateFrom = req.query.date_from ? req.query.date_from.toString().slice(0, 10) : null;
+    const dateTo = req.query.date_to ? req.query.date_to.toString().slice(0, 10) : null;
+
+    const data = await withDbConnection(async (connection) => {
+      await ensureAttendanceShape(connection);
+      await ensureOperationalScopeShape(connection);
+
+      const conditions = ['a.check_in IS NOT NULL'];
+      const params = [];
+
+      if (projectId) {
+        conditions.push('a.project_id = ?');
+        params.push(projectId);
+      }
+      if (dateFrom) {
+        conditions.push('a.attendance_date >= ?');
+        params.push(dateFrom);
+      }
+      if (dateTo) {
+        conditions.push('a.attendance_date <= ?');
+        params.push(dateTo);
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const [rows] = await connection.execute(
+        `SELECT
+           a.id,
+           a.project_id,
+           p.name AS project_name,
+           a.time_category,
+           a.check_in,
+           a.check_out,
+           a.attendance_date
+         FROM attendance a
+         LEFT JOIN projects p ON p.id = a.project_id
+         ${where}
+         ORDER BY a.attendance_date DESC, a.id DESC
+         LIMIT 1000`,
+        params
+      );
+
+      let productiveHours = 0;
+      let unproductiveHours = 0;
+      let neutralHours = 0;
+      let productiveRecords = 0;
+      let unproductiveRecords = 0;
+      let neutralRecords = 0;
+      let openRecords = 0;
+
+      const byProjectMap = new Map();
+
+      for (const row of rows) {
+        const category = normalizeTimeCategory(row.time_category);
+        if (!row.check_out) {
+          openRecords += 1;
+          continue;
+        }
+
+        const checkIn = new Date(row.check_in);
+        const checkOut = new Date(row.check_out);
+        const hours = Math.max(0, (checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60));
+
+        if (category === 'unproductive') {
+          unproductiveHours += hours;
+          unproductiveRecords += 1;
+        } else if (category === 'neutral') {
+          neutralHours += hours;
+          neutralRecords += 1;
+        } else {
+          productiveHours += hours;
+          productiveRecords += 1;
+        }
+
+        const key = row.project_id || 0;
+        const current = byProjectMap.get(key) || {
+          project_id: row.project_id,
+          project_name: row.project_name || 'Sin proyecto',
+          productive_hours: 0,
+          unproductive_hours: 0,
+          neutral_hours: 0,
+        };
+
+        if (category === 'unproductive') current.unproductive_hours += hours;
+        else if (category === 'neutral') current.neutral_hours += hours;
+        else current.productive_hours += hours;
+
+        byProjectMap.set(key, current);
+      }
+
+      const totalClosedHours = productiveHours + unproductiveHours + neutralHours;
+      const productivityRate = totalClosedHours <= 0
+        ? 0
+        : Math.round((productiveHours / totalClosedHours) * 100);
+
+      return {
+        productive_hours: Number(productiveHours.toFixed(2)),
+        unproductive_hours: Number(unproductiveHours.toFixed(2)),
+        neutral_hours: Number(neutralHours.toFixed(2)),
+        productive_records: productiveRecords,
+        unproductive_records: unproductiveRecords,
+        neutral_records: neutralRecords,
+        open_records: openRecords,
+        productivity_rate: productivityRate,
+        by_project: [...byProjectMap.values()].sort((a, b) => b.productive_hours - a.productive_hours),
+      };
+    });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al obtener resumen de productividad');
+  }
+};
+
 module.exports = {
   getAttendance,
   getAttendanceById,
   exportAttendanceReport,
   checkInAttendance,
   checkOutAttendance,
+  getProductivitySummary,
   ensureAttendanceShape,
   canExportHrAttendanceReport,
 };

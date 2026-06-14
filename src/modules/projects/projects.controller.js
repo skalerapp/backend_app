@@ -9,6 +9,8 @@ const {
   buildOperationalVisibilityFilter,
   canAccessProjectByOperationalScope,
 } = require('../operationalScopes/operationalScopes.service');
+const { ensureHseSchema, getProjectHseSummary } = require('../hse/hse.controller');
+const { ensureTasksSchema } = require('../tasks/tasks.controller');
 
 const normalizeProjectStatus = (value) => {
   const raw = (value || '').toString().trim().toLowerCase();
@@ -511,6 +513,232 @@ const assignCollaboratorToProject = async (req, res) => {
   }
 };
 
+const getProjectConsolidatedHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const projectId = Number(id);
+    if (!Number.isFinite(projectId)) {
+      throw new HttpError(400, 'ID de proyecto inválido');
+    }
+
+    const data = await withDbConnection(async (connection) => {
+      await ensureProjectsSchema(connection);
+      await ensureOperationalScopeShape(connection);
+      await ensureHseSchema(connection);
+      await ensureTasksSchema(connection);
+
+      const [projectRows] = await connection.execute(
+        `SELECT p.*, u.name AS manager_name
+         FROM projects p
+         LEFT JOIN users u ON u.id = p.manager_id
+         WHERE p.id = ?
+         LIMIT 1`,
+        [projectId]
+      );
+      if (!projectRows.length) {
+        throw new HttpError(404, 'Proyecto no encontrado');
+      }
+
+      const canAccess = await canAccessProjectByOperationalScope({
+        connection,
+        userId: req.user?.id,
+        role: normalizeRole(req.user?.role),
+        projectId,
+      });
+      if (!canAccess) {
+        throw new HttpError(403, 'No tienes acceso a este proyecto');
+      }
+
+      const [activityRows] = await connection.execute(
+        `SELECT a.id, a.status, a.description, a.start_time, a.end_time, a.executed_area_m2, a.executed_length_ml,
+                a.updated_at, e.employee_name AS employee_name
+         FROM activities a
+         LEFT JOIN employees e ON e.id = a.employee_id
+         WHERE a.project_id = ?
+         ORDER BY COALESCE(a.updated_at, a.start_time, a.end_time) DESC
+         LIMIT 20`,
+        [projectId]
+      );
+
+      const [attendanceRows] = await connection.execute(
+        `SELECT a.id, a.check_in, a.check_out, a.location_latitude, a.location_longitude,
+                COALESCE(u.name, e.employee_name) AS employee_name
+         FROM attendance a
+         LEFT JOIN employees e ON e.id = a.employee_id
+         LEFT JOIN users u ON u.id = a.user_id
+         WHERE a.project_id = ?
+         ORDER BY a.check_in DESC
+         LIMIT 20`,
+        [projectId]
+      );
+
+      const [warehouseRows] = await connection.execute(
+        `SELECT wm.id, wm.movement_type, wm.quantity, wm.movement_date,
+                COALESCE(receiver.name, wm.receiving_signature_name) AS receiver_name,
+                wa.asset_name, wa.asset_code
+         FROM warehouse_asset_movements wm
+         LEFT JOIN warehouse_assets wa ON wa.id = wm.asset_id
+         LEFT JOIN users receiver ON receiver.id = wm.receiver_user_id
+         WHERE wm.project_id = ?
+         ORDER BY wm.movement_date DESC, wm.id DESC
+         LIMIT 20`,
+        [projectId]
+      );
+
+      const [materialRows] = await connection.execute(
+        `SELECT id, material_name, unit, assigned_quantity, unit_cost,
+                (assigned_quantity * unit_cost) AS line_total
+         FROM project_material_items
+         WHERE project_id = ?
+         ORDER BY material_name ASC`,
+        [projectId]
+      );
+
+      const [allowanceRows] = await connection.execute(
+        `SELECT pa.assigned_amount,
+                COALESCE(SUM(ae.amount), 0) AS spent_amount,
+                COUNT(ae.id) AS expense_count
+         FROM project_allowances pa
+         LEFT JOIN allowance_expenses ae ON ae.allowance_id = pa.id
+         WHERE pa.project_id = ?
+         GROUP BY pa.id, pa.assigned_amount
+         LIMIT 1`,
+        [projectId]
+      );
+
+      const [commercialVisitRows] = await connection.execute(
+        `SELECT id, client_name, visit_date, status, expense_amount, summary, outcome
+         FROM commercial_visits
+         WHERE project_id = ?
+         ORDER BY visit_date DESC
+         LIMIT 10`,
+        [projectId]
+      );
+
+      const [commercialOpportunityRows] = await connection.execute(
+        `SELECT COUNT(*) AS total FROM commercial_opportunities WHERE project_id = ?`,
+        [projectId]
+      );
+
+      const [activitySummaryRows] = await connection.execute(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN LOWER(TRIM(COALESCE(status, ''))) IN ('completed', 'completada') THEN 1 ELSE 0 END) AS completed
+         FROM activities
+         WHERE project_id = ?`,
+        [projectId]
+      );
+
+      const [taskSummaryRows] = await connection.execute(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN LOWER(TRIM(COALESCE(status, ''))) = 'completed' THEN 1 ELSE 0 END) AS completed
+         FROM operational_tasks
+         WHERE project_id = ?`,
+        [projectId]
+      );
+
+      const [productivityRows] = await connection.execute(
+        `SELECT time_category, check_in, check_out
+         FROM attendance
+         WHERE project_id = ? AND check_in IS NOT NULL AND check_out IS NOT NULL`,
+        [projectId]
+      );
+
+      let productiveHours = 0;
+      let unproductiveHours = 0;
+      for (const row of productivityRows) {
+        const category = (row.time_category || 'productive').toString().toLowerCase();
+        const hours = Math.max(0, (new Date(row.check_out).getTime() - new Date(row.check_in).getTime()) / (1000 * 60 * 60));
+        if (category === 'unproductive' || category === 'improductivo') unproductiveHours += hours;
+        else productiveHours += hours;
+      }
+      const totalHours = productiveHours + unproductiveHours;
+      const productivityRate = totalHours <= 0 ? 0 : Math.round((productiveHours / totalHours) * 100);
+
+      const materialsCostTotal = materialRows.reduce(
+        (sum, row) => sum + Number(row.line_total || 0),
+        0
+      );
+
+      const allowance = allowanceRows[0] || {};
+      const activitySummary = activitySummaryRows[0] || {};
+      const taskSummary = taskSummaryRows[0] || {};
+      const hseSummary = await getProjectHseSummary(connection, projectId);
+
+      const timeline = [
+        ...activityRows.map((row) => ({
+          type: 'activity',
+          date: row.updated_at || row.start_time || row.end_time,
+          title: row.description || `Actividad #${row.id}`,
+          subtitle: row.employee_name,
+          status: row.status,
+        })),
+        ...attendanceRows.map((row) => ({
+          type: 'attendance',
+          date: row.check_in,
+          title: 'Asistencia registrada',
+          subtitle: row.employee_name,
+          status: row.check_out ? 'completed' : 'open',
+        })),
+        ...warehouseRows.map((row) => ({
+          type: 'warehouse',
+          date: row.movement_date,
+          title: `${row.movement_type || 'movimiento'} · ${row.asset_name || row.asset_code || 'Activo'}`,
+          subtitle: row.receiver_name,
+          status: row.movement_type,
+        })),
+        ...commercialVisitRows.map((row) => ({
+          type: 'commercial_visit',
+          date: row.visit_date,
+          title: `Visita · ${row.client_name || 'Cliente'}`,
+          subtitle: row.outcome || row.summary,
+          status: row.status,
+        })),
+      ]
+        .filter((item) => item.date)
+        .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime())
+        .slice(0, 30);
+
+      return {
+        project: projectRows[0],
+        summary: {
+          activities_total: Number(activitySummary.total || 0),
+          activities_completed: Number(activitySummary.completed || 0),
+          attendance_records: attendanceRows.length,
+          warehouse_movements: warehouseRows.length,
+          materials_items: materialRows.length,
+          materials_cost_total: materialsCostTotal,
+          allowance_assigned: Number(allowance.assigned_amount || 0),
+          allowance_spent: Number(allowance.spent_amount || 0),
+          allowance_expense_count: Number(allowance.expense_count || 0),
+          commercial_visits: commercialVisitRows.length,
+          commercial_opportunities: Number(commercialOpportunityRows[0]?.total || 0),
+          tasks_total: Number(taskSummary.total || 0),
+          tasks_completed: Number(taskSummary.completed || 0),
+          productive_hours: Number(productiveHours.toFixed(2)),
+          unproductive_hours: Number(unproductiveHours.toFixed(2)),
+          productivity_rate: productivityRate,
+          ...hseSummary,
+        },
+        timeline,
+        sections: {
+          activities: activityRows,
+          attendance: attendanceRows,
+          warehouse_movements: warehouseRows,
+          materials: materialRows,
+          commercial_visits: commercialVisitRows,
+          hse: hseSummary,
+        },
+      };
+    });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al obtener historial consolidado del proyecto');
+  }
+};
+
 // Quitar colaborador de proyecto
 const removeCollaboratorFromProject = async (req, res) => {
   try {
@@ -549,6 +777,7 @@ const removeCollaboratorFromProject = async (req, res) => {
 module.exports = {
   getProjects,
   getProjectById,
+  getProjectConsolidatedHistory,
   createProject,
   updateProject,
   getNextOtCode,
