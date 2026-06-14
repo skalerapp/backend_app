@@ -1,6 +1,8 @@
 const db = require('../../config/database');
+const { withDbConnection } = db;
 const pool = db.pool;
 const { applyAuditContext } = require('../../utils/auditContext');
+const { HttpError, sendControllerError } = require('../../utils/httpError');
 const { normalizeRole } = require('../../middleware/auth.middleware');
 const {
   ensureOperationalScopeShape,
@@ -104,12 +106,11 @@ const ensureProjectsSchema = async (connection) => {
 
 const getNextOtCode = async (req, res) => {
   try {
-    const connection = await pool.getConnection();
-    await ensureProjectOtSchema(connection);
-
-    const [statusRows] = await connection.execute("SHOW TABLE STATUS LIKE 'projects'");
-    const nextId = Number(statusRows?.[0]?.Auto_increment || 0);
-    connection.release();
+    const nextId = await withDbConnection(async (connection) => {
+      await ensureProjectOtSchema(connection);
+      const [statusRows] = await connection.execute("SHOW TABLE STATUS LIKE 'projects'");
+      return Number(statusRows?.[0]?.Auto_increment || 0);
+    });
 
     if (!nextId || Number.isNaN(nextId)) {
       return res.status(500).json({
@@ -126,11 +127,7 @@ const getNextOtCode = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al calcular próxima OT',
-      error: error.message,
-    });
+    sendControllerError(res, error, 'Error al calcular próxima OT');
   }
 };
 
@@ -171,11 +168,7 @@ const getProjects = async (req, res) => {
       data: projects
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener proyectos',
-      error: error.message
-    });
+    sendControllerError(res, error, 'Error al obtener proyectos');
   } finally {
     connection?.release();
   }
@@ -226,11 +219,7 @@ const getProjectById = async (req, res) => {
       data: projects[0]
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener proyecto',
-      error: error.message
-    });
+    sendControllerError(res, error, 'Error al obtener proyecto');
   } finally {
     connection?.release();
   }
@@ -248,52 +237,52 @@ const createProject = async (req, res) => {
       });
     }
 
-    const connection = await pool.getConnection();
-    await ensureProjectStatusSchema(connection);
-    await ensureProjectOtSchema(connection);
-    await ensureProjectActualEndDateSchema(connection);
-    await ensureProjectMeterFieldsSchema(connection);
+    const result = await withDbConnection(async (connection) => {
+      await ensureProjectStatusSchema(connection);
+      await ensureProjectOtSchema(connection);
+      await ensureProjectActualEndDateSchema(connection);
+      await ensureProjectMeterFieldsSchema(connection);
 
-    const normalizedStatus = normalizeProjectStatus(status);
-    const resolvedActualEndDate = isFinalStatus(normalizedStatus)
-      ? (actual_end_date || todayIsoDate())
-      : null;
-    
-    // Safe conversion of meter fields
-    let resolvedPlannedArea = 0;
-    if (planned_area_m2 !== undefined && planned_area_m2 !== null && planned_area_m2 !== '') {
-      const parsed = parseFloat(planned_area_m2);
-      resolvedPlannedArea = isNaN(parsed) ? 0 : Math.max(0, parsed);
-    }
-    
-    let resolvedPlannedLength = 0;
-    if (planned_length_ml !== undefined && planned_length_ml !== null && planned_length_ml !== '') {
-      const parsed = parseFloat(planned_length_ml);
-      resolvedPlannedLength = isNaN(parsed) ? 0 : Math.max(0, parsed);
-    }
-    
-    await applyAuditContext(connection, req);
-    const [result] = await connection.execute(
-      'INSERT INTO projects (name, description, budget, start_date, end_date, actual_end_date, manager_id, status, planned_area_m2, planned_length_ml, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())',
-      [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, manager_id || null, normalizedStatus, resolvedPlannedArea, resolvedPlannedLength]
-    );
+      const normalizedStatus = normalizeProjectStatus(status);
+      const resolvedActualEndDate = isFinalStatus(normalizedStatus)
+        ? (actual_end_date || todayIsoDate())
+        : null;
 
-    const generatedOtCode = otCodeFromProjectId(result.insertId);
-    await connection.execute('UPDATE projects SET ot_code = ? WHERE id = ?', [generatedOtCode, result.insertId]);
-    connection.release();
+      let resolvedPlannedArea = 0;
+      if (planned_area_m2 !== undefined && planned_area_m2 !== null && planned_area_m2 !== '') {
+        const parsed = parseFloat(planned_area_m2);
+        resolvedPlannedArea = isNaN(parsed) ? 0 : Math.max(0, parsed);
+      }
+
+      let resolvedPlannedLength = 0;
+      if (planned_length_ml !== undefined && planned_length_ml !== null && planned_length_ml !== '') {
+        const parsed = parseFloat(planned_length_ml);
+        resolvedPlannedLength = isNaN(parsed) ? 0 : Math.max(0, parsed);
+      }
+
+      await applyAuditContext(connection, req);
+      const [insertResult] = await connection.execute(
+        'INSERT INTO projects (name, description, budget, start_date, end_date, actual_end_date, manager_id, status, planned_area_m2, planned_length_ml, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())',
+        [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, manager_id || null, normalizedStatus, resolvedPlannedArea, resolvedPlannedLength]
+      );
+
+      const generatedOtCode = otCodeFromProjectId(insertResult.insertId);
+      await connection.execute('UPDATE projects SET ot_code = ? WHERE id = ?', [generatedOtCode, insertResult.insertId]);
+
+      return {
+        projectId: insertResult.insertId,
+        otCode: generatedOtCode,
+      };
+    });
 
     res.status(201).json({
       success: true,
       message: 'Proyecto creado exitosamente',
-      projectId: result.insertId,
-      otCode: generatedOtCode,
+      projectId: result.projectId,
+      otCode: result.otCode,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al crear proyecto',
-      error: error.message
-    });
+    sendControllerError(res, error, 'Error al crear proyecto');
   }
 };
 
@@ -310,90 +299,73 @@ const updateProject = async (req, res) => {
       });
     }
 
-    const connection = await pool.getConnection();
-    await ensureProjectStatusSchema(connection);
-    await ensureProjectOtSchema(connection);
-    await ensureProjectActualEndDateSchema(connection);
-    await ensureProjectMeterFieldsSchema(connection);
+    await withDbConnection(async (connection) => {
+      await ensureProjectStatusSchema(connection);
+      await ensureProjectOtSchema(connection);
+      await ensureProjectActualEndDateSchema(connection);
+      await ensureProjectMeterFieldsSchema(connection);
 
-    const normalizedStatus = normalizeProjectStatus(status);
-    const [existingRows] = await connection.execute(
-      'SELECT status, actual_end_date FROM projects WHERE id = ?',
-      [id]
-    );
-
-    if (existingRows.length === 0) {
-      connection.release();
-      return res.status(404).json({
-        success: false,
-        message: 'Proyecto no encontrado',
-      });
-    }
-
-    const existingStatus = normalizeProjectStatus(existingRows[0].status);
-    const existingActualEndDate = existingRows[0].actual_end_date;
-
-    if (isFinalStatus(existingStatus) && normalizedStatus !== existingStatus) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'Este proyecto ya está finalizado y no permite cambiar su estado',
-      });
-    }
-
-    if (!isFinalStatus(existingStatus) && isFinalStatus(normalizedStatus)) {
-      const [openActivitiesRows] = await connection.execute(
-        `SELECT COUNT(*) AS total
-         FROM activities
-         WHERE project_id = ?
-           AND LOWER(TRIM(COALESCE(status, ''))) NOT IN ('completed', 'completado', 'closed', 'cerrado', 'cancelled', 'cancelado')`,
+      const normalizedStatus = normalizeProjectStatus(status);
+      const [existingRows] = await connection.execute(
+        'SELECT status, actual_end_date FROM projects WHERE id = ?',
         [id]
       );
 
-      const openActivities = Number(openActivitiesRows?.[0]?.total || 0);
-      if (openActivities > 0) {
-        connection.release();
-        return res.status(409).json({
-          success: false,
-          message: `No se puede finalizar el proyecto: hay ${openActivities} actividad(es) sin cerrar/completar/cancelar`,
-        });
+      if (existingRows.length === 0) {
+        throw new HttpError(404, 'Proyecto no encontrado');
       }
-    }
 
-    const resolvedActualEndDate = isFinalStatus(normalizedStatus)
-      ? (actual_end_date || existingActualEndDate || todayIsoDate())
-      : null;
-    
-    // Safe conversion of meter fields
-    let resolvedPlannedArea = 0;
-    if (planned_area_m2 !== undefined && planned_area_m2 !== null && planned_area_m2 !== '') {
-      const parsed = parseFloat(planned_area_m2);
-      resolvedPlannedArea = isNaN(parsed) ? 0 : Math.max(0, parsed);
-    }
-    
-    let resolvedPlannedLength = 0;
-    if (planned_length_ml !== undefined && planned_length_ml !== null && planned_length_ml !== '') {
-      const parsed = parseFloat(planned_length_ml);
-      resolvedPlannedLength = isNaN(parsed) ? 0 : Math.max(0, parsed);
-    }
+      const existingStatus = normalizeProjectStatus(existingRows[0].status);
+      const existingActualEndDate = existingRows[0].actual_end_date;
 
-    await applyAuditContext(connection, req);
-    await connection.execute(
-      'UPDATE projects SET name = ?, description = ?, budget = ?, start_date = ?, end_date = ?, actual_end_date = ?, status = ?, manager_id = ?, planned_area_m2 = ?, planned_length_ml = ?, updated_at = NOW() WHERE id = ?',
-      [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, normalizedStatus, manager_id || null, resolvedPlannedArea, resolvedPlannedLength, id]
-    );
-    connection.release();
+      if (isFinalStatus(existingStatus) && normalizedStatus !== existingStatus) {
+        throw new HttpError(409, 'Este proyecto ya está finalizado y no permite cambiar su estado');
+      }
+
+      if (!isFinalStatus(existingStatus) && isFinalStatus(normalizedStatus)) {
+        const [openActivitiesRows] = await connection.execute(
+          `SELECT COUNT(*) AS total
+           FROM activities
+           WHERE project_id = ?
+             AND LOWER(TRIM(COALESCE(status, ''))) NOT IN ('completed', 'completado', 'closed', 'cerrado', 'cancelled', 'cancelado')`,
+          [id]
+        );
+
+        const openActivities = Number(openActivitiesRows?.[0]?.total || 0);
+        if (openActivities > 0) {
+          throw new HttpError(409, `No se puede finalizar el proyecto: hay ${openActivities} actividad(es) sin cerrar/completar/cancelar`);
+        }
+      }
+
+      const resolvedActualEndDate = isFinalStatus(normalizedStatus)
+        ? (actual_end_date || existingActualEndDate || todayIsoDate())
+        : null;
+
+      let resolvedPlannedArea = 0;
+      if (planned_area_m2 !== undefined && planned_area_m2 !== null && planned_area_m2 !== '') {
+        const parsed = parseFloat(planned_area_m2);
+        resolvedPlannedArea = isNaN(parsed) ? 0 : Math.max(0, parsed);
+      }
+
+      let resolvedPlannedLength = 0;
+      if (planned_length_ml !== undefined && planned_length_ml !== null && planned_length_ml !== '') {
+        const parsed = parseFloat(planned_length_ml);
+        resolvedPlannedLength = isNaN(parsed) ? 0 : Math.max(0, parsed);
+      }
+
+      await applyAuditContext(connection, req);
+      await connection.execute(
+        'UPDATE projects SET name = ?, description = ?, budget = ?, start_date = ?, end_date = ?, actual_end_date = ?, status = ?, manager_id = ?, planned_area_m2 = ?, planned_length_ml = ?, updated_at = NOW() WHERE id = ?',
+        [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, normalizedStatus, manager_id || null, resolvedPlannedArea, resolvedPlannedLength, id]
+      );
+    });
 
     res.json({
       success: true,
       message: 'Proyecto actualizado'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al actualizar proyecto',
-      error: error.message
-    });
+    sendControllerError(res, error, 'Error al actualizar proyecto');
   }
 };
 
@@ -402,24 +374,20 @@ const deleteProject = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const connection = await pool.getConnection();
-    await applyAuditContext(connection, req);
-    await connection.execute(
-      'DELETE FROM projects WHERE id = ?',
-      [id]
-    );
-    connection.release();
+    await withDbConnection(async (connection) => {
+      await applyAuditContext(connection, req);
+      await connection.execute(
+        'DELETE FROM projects WHERE id = ?',
+        [id]
+      );
+    });
 
     res.json({
       success: true,
       message: 'Proyecto eliminado'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al eliminar proyecto',
-      error: error.message
-    });
+    sendControllerError(res, error, 'Error al eliminar proyecto');
   }
 };
 
@@ -427,52 +395,46 @@ const deleteProject = async (req, res) => {
 const getProjectCollaborators = async (req, res) => {
   try {
     const { id } = req.params;
-    const connection = await pool.getConnection();
-    await ensureProjectCollaboratorsSchema(connection);
-    await ensureOperationalScopeShape(connection);
+    const rows = await withDbConnection(async (connection) => {
+      await ensureProjectCollaboratorsSchema(connection);
+      await ensureOperationalScopeShape(connection);
 
-    const normalizedRole = normalizeRole(req.user?.role);
-    if (normalizedRole === 'leader' || normalizedRole === 'supervisor') {
-      const hasProjectAccess = await canAccessProjectByOperationalScope({
-        connection,
-        userId: req.user.id,
-        role: normalizedRole,
-        projectId: Number(id),
-      });
-
-      if (!hasProjectAccess) {
-        connection.release();
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes acceso al proyecto solicitado',
+      const normalizedRole = normalizeRole(req.user?.role);
+      if (normalizedRole === 'leader' || normalizedRole === 'supervisor') {
+        const hasProjectAccess = await canAccessProjectByOperationalScope({
+          connection,
+          userId: req.user.id,
+          role: normalizedRole,
+          projectId: Number(id),
         });
-      }
-    }
 
-    const [rows] = await connection.execute(
-      `SELECT
-        pc.id AS collaborator_assignment_id,
-        e.*,
-        e.employee_name AS name,
-        u.name AS app_user_name,
-        u.email AS app_user_email,
-        u.email AS email
-      FROM project_collaborators pc
-      INNER JOIN employees e ON pc.employee_id = e.id
-      LEFT JOIN users u ON e.user_id = u.id
-      WHERE pc.project_id = ?
-      ORDER BY e.created_at DESC`,
-      [id]
-    );
-    connection.release();
+        if (!hasProjectAccess) {
+          throw new HttpError(403, 'No tienes acceso al proyecto solicitado');
+        }
+      }
+
+      const [result] = await connection.execute(
+        `SELECT
+          pc.id AS collaborator_assignment_id,
+          e.*,
+          e.employee_name AS name,
+          u.name AS app_user_name,
+          u.email AS app_user_email,
+          u.email AS email
+        FROM project_collaborators pc
+        INNER JOIN employees e ON pc.employee_id = e.id
+        LEFT JOIN users u ON e.user_id = u.id
+        WHERE pc.project_id = ?
+        ORDER BY e.created_at DESC`,
+        [id]
+      );
+
+      return result;
+    });
 
     res.json({ success: true, data: rows });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener colaboradores del proyecto',
-      error: error.message
-    });
+    sendControllerError(res, error, 'Error al obtener colaboradores del proyecto');
   }
 };
 
@@ -486,76 +448,66 @@ const assignCollaboratorToProject = async (req, res) => {
       return res.status(400).json({ success: false, message: 'employee_id es requerido' });
     }
 
-    const connection = await pool.getConnection();
-    await ensureProjectCollaboratorsSchema(connection);
+    const outcome = await withDbConnection(async (connection) => {
+      await ensureProjectCollaboratorsSchema(connection);
 
-    const [projectRows] = await connection.execute('SELECT id, name FROM projects WHERE id = ?', [id]);
-    if (projectRows.length === 0) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Proyecto no encontrado' });
-    }
-
-    const [employeeRows] = await connection.execute('SELECT id FROM employees WHERE id = ?', [employee_id]);
-    if (employeeRows.length === 0) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Colaborador no encontrado' });
-    }
-
-    const [existing] = await connection.execute(
-      `SELECT pc.project_id, p.name AS project_name, p.status AS project_status
-       FROM project_collaborators pc
-       INNER JOIN projects p ON pc.project_id = p.id
-       WHERE pc.employee_id = ?
-       LIMIT 1`,
-      [employee_id]
-    );
-
-    if (existing.length > 0) {
-      const assignedProject = existing[0];
-      if (parseInt(assignedProject.project_id, 10) === parseInt(id, 10)) {
-        connection.release();
-        return res.status(409).json({
-          success: false,
-          message: 'El colaborador ya está asignado a este proyecto'
-        });
+      const [projectRows] = await connection.execute('SELECT id, name FROM projects WHERE id = ?', [id]);
+      if (projectRows.length === 0) {
+        throw new HttpError(404, 'Proyecto no encontrado');
       }
 
-      const normalizedAssignedStatus = normalizeProjectStatus(assignedProject.project_status);
-      const canReassign = ['cancelled', 'completed', 'closed', 'paused'].includes(normalizedAssignedStatus);
-      if (canReassign) {
-        await applyAuditContext(connection, req);
-        await connection.execute(
-          'UPDATE project_collaborators SET project_id = ?, created_at = NOW() WHERE employee_id = ?',
-          [id, employee_id]
-        );
-        connection.release();
-        return res.status(200).json({
-          success: true,
-          message: 'Colaborador reasignado a un nuevo proyecto porque el anterior ya no está activo'
-        });
+      const [employeeRows] = await connection.execute('SELECT id FROM employees WHERE id = ?', [employee_id]);
+      if (employeeRows.length === 0) {
+        throw new HttpError(404, 'Colaborador no encontrado');
       }
 
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: `El colaborador ya está asignado al proyecto ${assignedProject.project_name}`
-      });
-    }
+      const [existing] = await connection.execute(
+        `SELECT pc.project_id, p.name AS project_name, p.status AS project_status
+         FROM project_collaborators pc
+         INNER JOIN projects p ON pc.project_id = p.id
+         WHERE pc.employee_id = ?
+         LIMIT 1`,
+        [employee_id]
+      );
 
-    await applyAuditContext(connection, req);
-    await connection.execute(
-      'INSERT INTO project_collaborators (project_id, employee_id, created_at) VALUES (?, ?, NOW())',
-      [id, employee_id]
-    );
-    connection.release();
+      if (existing.length > 0) {
+        const assignedProject = existing[0];
+        if (parseInt(assignedProject.project_id, 10) === parseInt(id, 10)) {
+          throw new HttpError(409, 'El colaborador ya está asignado a este proyecto');
+        }
 
-    res.status(201).json({ success: true, message: 'Colaborador asignado al proyecto' });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al asignar colaborador al proyecto',
-      error: error.message
+        const normalizedAssignedStatus = normalizeProjectStatus(assignedProject.project_status);
+        const canReassign = ['cancelled', 'completed', 'closed', 'paused'].includes(normalizedAssignedStatus);
+        if (canReassign) {
+          await applyAuditContext(connection, req);
+          await connection.execute(
+            'UPDATE project_collaborators SET project_id = ?, created_at = NOW() WHERE employee_id = ?',
+            [id, employee_id]
+          );
+          return {
+            status: 200,
+            message: 'Colaborador reasignado a un nuevo proyecto porque el anterior ya no está activo',
+          };
+        }
+
+        throw new HttpError(409, `El colaborador ya está asignado al proyecto ${assignedProject.project_name}`);
+      }
+
+      await applyAuditContext(connection, req);
+      await connection.execute(
+        'INSERT INTO project_collaborators (project_id, employee_id, created_at) VALUES (?, ?, NOW())',
+        [id, employee_id]
+      );
+
+      return {
+        status: 201,
+        message: 'Colaborador asignado al proyecto',
+      };
     });
+
+    res.status(outcome.status).json({ success: true, message: outcome.message });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al asignar colaborador al proyecto');
   }
 };
 
@@ -563,41 +515,34 @@ const assignCollaboratorToProject = async (req, res) => {
 const removeCollaboratorFromProject = async (req, res) => {
   try {
     const { id, employeeId } = req.params;
-    const connection = await pool.getConnection();
-    await ensureProjectCollaboratorsSchema(connection);
 
-    const [activeActivities] = await connection.execute(
-      `SELECT id
-       FROM activities
-       WHERE project_id = ?
-         AND employee_id = ?
-         AND (status IS NULL OR status NOT IN ('completed', 'cancelled'))
-       LIMIT 1`,
-      [id, employeeId]
-    );
+    await withDbConnection(async (connection) => {
+      await ensureProjectCollaboratorsSchema(connection);
 
-    if (activeActivities.length > 0) {
-      connection.release();
-      return res.status(409).json({
-        success: false,
-        message: 'No se puede remover: el colaborador tiene actividades activas en este proyecto'
-      });
-    }
+      const [activeActivities] = await connection.execute(
+        `SELECT id
+         FROM activities
+         WHERE project_id = ?
+           AND employee_id = ?
+           AND (status IS NULL OR status NOT IN ('completed', 'cancelled'))
+         LIMIT 1`,
+        [id, employeeId]
+      );
 
-    await applyAuditContext(connection, req);
-    await connection.execute(
-      'DELETE FROM project_collaborators WHERE project_id = ? AND employee_id = ?',
-      [id, employeeId]
-    );
-    connection.release();
+      if (activeActivities.length > 0) {
+        throw new HttpError(409, 'No se puede remover: el colaborador tiene actividades activas en este proyecto');
+      }
+
+      await applyAuditContext(connection, req);
+      await connection.execute(
+        'DELETE FROM project_collaborators WHERE project_id = ? AND employee_id = ?',
+        [id, employeeId]
+      );
+    });
 
     res.json({ success: true, message: 'Colaborador removido del proyecto' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al remover colaborador del proyecto',
-      error: error.message
-    });
+    sendControllerError(res, error, 'Error al remover colaborador del proyecto');
   }
 };
 

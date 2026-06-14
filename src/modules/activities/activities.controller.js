@@ -1,6 +1,8 @@
 const db = require('../../config/database');
+const { withDbConnection } = db;
 const pool = db.pool;
 const { applyAuditContext } = require('../../utils/auditContext');
+const { HttpError, sendControllerError } = require('../../utils/httpError');
 const {
   ensureOperationalScopeShape,
   buildOperationalVisibilityFilter,
@@ -213,44 +215,45 @@ const ensureActivitiesSchema = async (connection) => {
 // Obtener todas las actividades
 const getActivities = async (req, res) => {
   try {
-    const connection = await pool.getConnection();
-    await ensureActivityStatusShape(connection);
-    await ensureActivityLegacyShape(connection);
-    await ensureOperationalScopeShape(connection);
+    const activities = await withDbConnection(async (connection) => {
+      await ensureActivityStatusShape(connection);
+      await ensureActivityLegacyShape(connection);
+      await ensureOperationalScopeShape(connection);
 
-    const normalizedRole = normalizeRole(req.user?.role);
-    const conditions = [];
-    const params = [];
+      const normalizedRole = normalizeRole(req.user?.role);
+      const conditions = [];
+      const params = [];
 
-    const visibility = buildOperationalVisibilityFilter({
-      normalizedRole,
-      userId: req.user.id,
-      projectAlias: 'p',
-      employeeUserExpression: 'e.user_id',
+      const visibility = buildOperationalVisibilityFilter({
+        normalizedRole,
+        userId: req.user.id,
+        projectAlias: 'p',
+        employeeUserExpression: 'e.user_id',
+      });
+
+      if (visibility.clause) {
+        conditions.push(visibility.clause);
+        params.push(...visibility.params);
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const [rows] = await connection.execute(
+        `SELECT a.*, p.name AS project_name, e.position AS employee_position, e.employee_name AS employee_name
+         FROM activities a
+         LEFT JOIN projects p ON a.project_id = p.id
+         LEFT JOIN employees e ON a.employee_id = e.id
+         ${where}
+         ORDER BY a.created_at DESC`,
+        params,
+      );
+
+      return rows;
     });
-
-    if (visibility.clause) {
-      conditions.push(visibility.clause);
-      params.push(...visibility.params);
-    }
-
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-
-    const [activities] = await connection.execute(
-      `SELECT a.*, p.name AS project_name, e.position AS employee_position, e.employee_name AS employee_name
-       FROM activities a
-       LEFT JOIN projects p ON a.project_id = p.id
-       LEFT JOIN employees e ON a.employee_id = e.id
-       ${where}
-       ORDER BY a.created_at DESC`,
-      params,
-    );
-    connection.release();
 
     res.json({ success: true, data: activities });
   } catch (error) {
-    console.error('getActivities error:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener actividades', error: error.message });
+    sendControllerError(res, error, 'Error al obtener actividades');
   }
 };
 
@@ -258,46 +261,47 @@ const getActivities = async (req, res) => {
 const getActivityById = async (req, res) => {
   try {
     const { id } = req.params;
-    const connection = await pool.getConnection();
-    await ensureActivityStatusShape(connection);
-    await ensureActivityLegacyShape(connection);
-    await ensureOperationalScopeShape(connection);
-    await syncLegacyActivityRow(connection, id);
+    const activity = await withDbConnection(async (connection) => {
+      await ensureActivityStatusShape(connection);
+      await ensureActivityLegacyShape(connection);
+      await ensureOperationalScopeShape(connection);
+      await syncLegacyActivityRow(connection, id);
 
-    const normalizedRole = normalizeRole(req.user?.role);
-    const visibility = buildOperationalVisibilityFilter({
-      normalizedRole,
-      userId: req.user.id,
-      projectAlias: 'p',
-      employeeUserExpression: 'e.user_id',
+      const normalizedRole = normalizeRole(req.user?.role);
+      const visibility = buildOperationalVisibilityFilter({
+        normalizedRole,
+        userId: req.user.id,
+        projectAlias: 'p',
+        employeeUserExpression: 'e.user_id',
+      });
+      const conditions = ['a.id = ?'];
+      const params = [id];
+      if (visibility.clause) {
+        conditions.push(visibility.clause);
+        params.push(...visibility.params);
+      }
+
+      const where = `WHERE ${conditions.join(' AND ')}`;
+
+      const [rows] = await connection.execute(
+        `SELECT a.*, p.name AS project_name, e.position AS employee_position, e.employee_name AS employee_name
+         FROM activities a
+         LEFT JOIN projects p ON a.project_id = p.id
+         LEFT JOIN employees e ON a.employee_id = e.id
+         ${where}`,
+        params
+      );
+
+      return rows[0] || null;
     });
-    const conditions = ['a.id = ?'];
-    const params = [id];
-    if (visibility.clause) {
-      conditions.push(visibility.clause);
-      params.push(...visibility.params);
-    }
 
-    const where = `WHERE ${conditions.join(' AND ')}`;
-
-    const [rows] = await connection.execute(
-      `SELECT a.*, p.name AS project_name, e.position AS employee_position, e.employee_name AS employee_name
-       FROM activities a
-       LEFT JOIN projects p ON a.project_id = p.id
-       LEFT JOIN employees e ON a.employee_id = e.id
-       ${where}`,
-      params
-    );
-    connection.release();
-
-    if (rows.length === 0) {
+    if (!activity) {
       return res.status(404).json({ success: false, message: 'Actividad no encontrada' });
     }
 
-    res.json({ success: true, data: rows[0] });
+    res.json({ success: true, data: activity });
   } catch (error) {
-    console.error('getActivityById error:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener actividad', error: error.message });
+    sendControllerError(res, error, 'Error al obtener actividad');
   }
 };
 
@@ -310,37 +314,36 @@ const createActivity = async (req, res) => {
       return res.status(400).json({ success: false, message: 'project_id y employee_id son requeridos' });
     }
 
-    const connection = await pool.getConnection();
-    // ensure columns exist
-    try {
-      await connection.execute("ALTER TABLE activities ADD COLUMN start_time DATETIME");
-    } catch (e) {}
-    try {
-      await connection.execute("ALTER TABLE activities ADD COLUMN end_time DATETIME");
-    } catch (e) {}
-    try {
-      await connection.execute("ALTER TABLE activities ADD COLUMN status ENUM('planned','in_progress','paused','completed','cancelled') DEFAULT 'planned'");
-    } catch (e) {}
+    const activityId = await withDbConnection(async (connection) => {
+      try {
+        await connection.execute("ALTER TABLE activities ADD COLUMN start_time DATETIME");
+      } catch (e) {}
+      try {
+        await connection.execute("ALTER TABLE activities ADD COLUMN end_time DATETIME");
+      } catch (e) {}
+      try {
+        await connection.execute("ALTER TABLE activities ADD COLUMN status ENUM('planned','in_progress','paused','completed','cancelled') DEFAULT 'planned'");
+      } catch (e) {}
 
-    await ensureActivityStatusShape(connection);
-    await ensureActivityLegacyShape(connection);
-    const normalizedStatus = normalizeActivityStatus(status);
-    await applyAuditContext(connection, req);
+      await ensureActivityStatusShape(connection);
+      await ensureActivityLegacyShape(connection);
+      const normalizedStatus = normalizeActivityStatus(status);
+      await applyAuditContext(connection, req);
 
-    const resolvedExecutedArea = Number(executed_area_m2) || 0;
-    const resolvedExecutedLength = Number(executed_length_ml) || 0;
-    const [result] = await connection.execute(
-      `INSERT INTO activities (project_id, employee_id, description, start_time, end_time, status, executed_area_m2, executed_length_ml, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [project_id, employee_id, description || null, start_time || null, end_time || null, normalizedStatus, resolvedExecutedArea, resolvedExecutedLength]
-    );
-    await syncLegacyActivityRow(connection, result.insertId);
-    connection.release();
+      const resolvedExecutedArea = Number(executed_area_m2) || 0;
+      const resolvedExecutedLength = Number(executed_length_ml) || 0;
+      const [result] = await connection.execute(
+        `INSERT INTO activities (project_id, employee_id, description, start_time, end_time, status, executed_area_m2, executed_length_ml, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [project_id, employee_id, description || null, start_time || null, end_time || null, normalizedStatus, resolvedExecutedArea, resolvedExecutedLength]
+      );
+      await syncLegacyActivityRow(connection, result.insertId);
+      return result.insertId;
+    });
 
-    res.status(201).json({ success: true, message: 'Actividad creada', activityId: result.insertId });
+    res.status(201).json({ success: true, message: 'Actividad creada', activityId });
   } catch (error) {
-    console.error('createActivity error:', error);
-    res.status(500).json({ success: false, message: 'Error al crear actividad', error: error.message });
+    sendControllerError(res, error, 'Error al crear actividad');
   }
 };
 
@@ -350,124 +353,111 @@ const updateActivity = async (req, res) => {
     const { id } = req.params;
     const { project_id, employee_id, description, start_time, end_time, status, executed_area_m2, executed_length_ml } = req.body;
     const normalizedRole = normalizeRole(req.user?.role);
-    const connection = await pool.getConnection();
-    // ensure columns exist as well
-    try {
-      await connection.execute("ALTER TABLE activities ADD COLUMN start_time DATETIME");
-    } catch (e) {}
-    try {
-      await connection.execute("ALTER TABLE activities ADD COLUMN end_time DATETIME");
-    } catch (e) {}
-    try {
-      await connection.execute("ALTER TABLE activities ADD COLUMN status ENUM('planned','in_progress','paused','completed','cancelled') DEFAULT 'planned'");
-    } catch (e) {}
 
-    await ensureActivityStatusShape(connection);
-    await ensureActivityLegacyShape(connection);
+    await withDbConnection(async (connection) => {
+      try {
+        await connection.execute("ALTER TABLE activities ADD COLUMN start_time DATETIME");
+      } catch (e) {}
+      try {
+        await connection.execute("ALTER TABLE activities ADD COLUMN end_time DATETIME");
+      } catch (e) {}
+      try {
+        await connection.execute("ALTER TABLE activities ADD COLUMN status ENUM('planned','in_progress','paused','completed','cancelled') DEFAULT 'planned'");
+      } catch (e) {}
 
-    // fetch existing row to preserve values
-    const [rows] = await connection.execute('SELECT * FROM activities WHERE id = ?', [id]);
-    if (rows.length === 0) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Actividad no encontrada' });
-    }
-    const existing = rows[0];
-    const previousStatus = normalizeActivityStatus(existing.status);
-    const nextStatus = status !== undefined ? normalizeActivityStatus(status) : previousStatus;
+      await ensureActivityStatusShape(connection);
+      await ensureActivityLegacyShape(connection);
 
-    if (normalizedRole === 'leader' || normalizedRole === 'supervisor') {
-      const hasProjectAccess = await canAccessProjectByOperationalScope({
-        connection,
-        userId: req.user.id,
-        role: normalizedRole,
-        projectId: Number(existing.project_id),
-      });
+      const [rows] = await connection.execute('SELECT * FROM activities WHERE id = ?', [id]);
+      if (rows.length === 0) {
+        throw new HttpError(404, 'Actividad no encontrada');
+      }
+      const existing = rows[0];
+      const previousStatus = normalizeActivityStatus(existing.status);
+      const nextStatus = status !== undefined ? normalizeActivityStatus(status) : previousStatus;
 
-      if (!hasProjectAccess) {
-        connection.release();
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes acceso operativo a esta actividad',
+      if (normalizedRole === 'leader' || normalizedRole === 'supervisor') {
+        const hasProjectAccess = await canAccessProjectByOperationalScope({
+          connection,
+          userId: req.user.id,
+          role: normalizedRole,
+          projectId: Number(existing.project_id),
         });
+
+        if (!hasProjectAccess) {
+          throw new HttpError(403, 'No tienes acceso operativo a esta actividad');
+        }
+
+        const triesToChangeRestrictedFields =
+          project_id !== undefined ||
+          employee_id !== undefined ||
+          description !== undefined ||
+          start_time !== undefined ||
+          end_time !== undefined;
+
+        if (triesToChangeRestrictedFields) {
+          throw new HttpError(403, 'Para tu rol solo está permitido actualizar el estado de la actividad');
+        }
       }
 
-      const triesToChangeRestrictedFields =
-        project_id !== undefined ||
-        employee_id !== undefined ||
-        description !== undefined ||
-        start_time !== undefined ||
-        end_time !== undefined;
+      const pid = project_id !== undefined ? project_id : existing.project_id;
+      const eid = employee_id !== undefined ? employee_id : existing.employee_id;
+      const desc = description !== undefined ? description : existing.description;
+      let st = start_time !== undefined ? start_time : existing.start_time;
+      let et = end_time !== undefined ? end_time : existing.end_time;
+      const resolvedExecutedArea = executed_area_m2 !== undefined ? Number(executed_area_m2) : Number(existing.executed_area_m2 || 0);
+      const resolvedExecutedLength = executed_length_ml !== undefined ? Number(executed_length_ml) : Number(existing.executed_length_ml || 0);
+      const stts = nextStatus;
 
-      if (triesToChangeRestrictedFields) {
-        connection.release();
-        return res.status(403).json({
-          success: false,
-          message: 'Para tu rol solo está permitido actualizar el estado de la actividad',
-        });
+      if (nextStatus === 'in_progress' && previousStatus !== 'in_progress' && (st == null || st === '')) {
+        await connection.execute(
+          'UPDATE activities SET start_time = NOW() WHERE id = ? AND start_time IS NULL',
+          [id]
+        );
+        const [startedRows] = await connection.execute('SELECT start_time FROM activities WHERE id = ?', [id]);
+        st = startedRows[0]?.start_time ?? st;
       }
-    }
 
-    const pid = project_id !== undefined ? project_id : existing.project_id;
-    const eid = employee_id !== undefined ? employee_id : existing.employee_id;
-    const desc = description !== undefined ? description : existing.description;
-    let st = start_time !== undefined ? start_time : existing.start_time;
-    let et = end_time !== undefined ? end_time : existing.end_time;
-    const resolvedExecutedArea = executed_area_m2 !== undefined ? Number(executed_area_m2) : Number(existing.executed_area_m2 || 0);
-    const resolvedExecutedLength = executed_length_ml !== undefined ? Number(executed_length_ml) : Number(existing.executed_length_ml || 0);
-    const stts = nextStatus;
+      if (
+        (nextStatus === 'completed' || nextStatus === 'cancelled') &&
+        previousStatus !== 'completed' &&
+        previousStatus !== 'cancelled' &&
+        (et == null || et === '')
+      ) {
+        await connection.execute(
+          'UPDATE activities SET end_time = NOW() WHERE id = ? AND end_time IS NULL',
+          [id]
+        );
+        const [finishedRows] = await connection.execute('SELECT end_time FROM activities WHERE id = ?', [id]);
+        et = finishedRows[0]?.end_time ?? et;
+      }
 
-    if (nextStatus === 'in_progress' && previousStatus !== 'in_progress' && (st == null || st === '')) {
+      await applyAuditContext(connection, req);
       await connection.execute(
-        'UPDATE activities SET start_time = NOW() WHERE id = ? AND start_time IS NULL',
-        [id]
+        `UPDATE activities SET project_id = ?, employee_id = ?, description = ?, start_time = ?, end_time = ?, status = ?, executed_area_m2 = ?, executed_length_ml = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [pid, eid, desc, st, et, stts, resolvedExecutedArea, resolvedExecutedLength, id]
       );
-      const [startedRows] = await connection.execute('SELECT start_time FROM activities WHERE id = ?', [id]);
-      st = startedRows[0]?.start_time ?? st;
-    }
-
-    if (
-      (nextStatus === 'completed' || nextStatus === 'cancelled') &&
-      previousStatus !== 'completed' &&
-      previousStatus !== 'cancelled' &&
-      (et == null || et === '')
-    ) {
-      await connection.execute(
-        'UPDATE activities SET end_time = NOW() WHERE id = ? AND end_time IS NULL',
-        [id]
-      );
-      const [finishedRows] = await connection.execute('SELECT end_time FROM activities WHERE id = ?', [id]);
-      et = finishedRows[0]?.end_time ?? et;
-    }
-
-    await applyAuditContext(connection, req);
-    await connection.execute(
-      `UPDATE activities SET project_id = ?, employee_id = ?, description = ?, start_time = ?, end_time = ?, status = ?, executed_area_m2 = ?, executed_length_ml = ?, updated_at = NOW()
-       WHERE id = ?`,
-      [pid, eid, desc, st, et, stts, resolvedExecutedArea, resolvedExecutedLength, id]
-    );
-    await syncLegacyActivityRow(connection, id);
-    connection.release();
+      await syncLegacyActivityRow(connection, id);
+    });
 
     res.json({ success: true, message: 'Actividad actualizada' });
   } catch (error) {
-    console.error('updateActivity error:', error);
-    res.status(500).json({ success: false, message: 'Error al actualizar actividad', error: error.message });
+    sendControllerError(res, error, 'Error al actualizar actividad');
   }
 };
 
-// Eliminar actividad
 const deleteActivity = async (req, res) => {
   try {
     const { id } = req.params;
-    const connection = await pool.getConnection();
-    await applyAuditContext(connection, req);
-    await connection.execute('DELETE FROM activities WHERE id = ?', [id]);
-    connection.release();
+    await withDbConnection(async (connection) => {
+      await applyAuditContext(connection, req);
+      await connection.execute('DELETE FROM activities WHERE id = ?', [id]);
+    });
 
     res.json({ success: true, message: 'Actividad eliminada' });
   } catch (error) {
-    console.error('deleteActivity error:', error);
-    res.status(500).json({ success: false, message: 'Error al eliminar actividad', error: error.message });
+    sendControllerError(res, error, 'Error al eliminar actividad');
   }
 };
 

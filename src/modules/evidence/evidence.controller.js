@@ -1,6 +1,7 @@
 const db = require('../../config/database');
-const pool = db.pool;
+const { withDbConnection } = db;
 const path = require('path');
+const { sendControllerError } = require('../../utils/httpError');
 
 const ensureEvidenceShape = async (connection) => {
   await connection.execute(`
@@ -58,21 +59,21 @@ const uploadEvidence = async (req, res) => {
     const normalizedActivityId = normalizeActivityId(activity_id);
     const normalizedProjectId = normalizeProjectId(project_id);
 
-    // Ruta relativa para almacenar en BD
     const relativePath = path.relative(path.join(__dirname, '../../'), req.file.path).replace(/\\/g, '/');
 
-    const connection = await pool.getConnection();
-    await ensureEvidenceShape(connection);
-    const [result] = await connection.execute(
-      'INSERT INTO evidence (activity_id, project_id, module_type, file_path, file_name, file_size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
-      [normalizedActivityId, normalizedProjectId, module_type || 'general', relativePath, req.file.originalname, req.file.size, uploadedBy]
-    );
-    connection.release();
+    const evidenceId = await withDbConnection(async (connection) => {
+      await ensureEvidenceShape(connection);
+      const [result] = await connection.execute(
+        'INSERT INTO evidence (activity_id, project_id, module_type, file_path, file_name, file_size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
+        [normalizedActivityId, normalizedProjectId, module_type || 'general', relativePath, req.file.originalname, req.file.size, uploadedBy]
+      );
+      return result.insertId;
+    });
 
     res.status(201).json({
       success: true,
       message: 'Evidencia subida correctamente',
-      evidenceId: result.insertId,
+      evidenceId,
       file: {
         path: relativePath,
         name: req.file.originalname,
@@ -80,11 +81,7 @@ const uploadEvidence = async (req, res) => {
       }
     });
   } catch (err) {
-    res.status(err.status || 500).json({
-      success: false,
-      message: err.message || 'Error subiendo evidencia',
-      error: err.message,
-    });
+    sendControllerError(res, err, 'Error subiendo evidencia');
   }
 };
 
@@ -109,14 +106,15 @@ const listEvidence = async (req, res) => {
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const connection = await pool.getConnection();
-    await ensureEvidenceShape(connection);
-    const [rows] = await connection.execute(`SELECT * FROM evidence ${where} ORDER BY created_at DESC`, params);
-    connection.release();
+    const rows = await withDbConnection(async (connection) => {
+      await ensureEvidenceShape(connection);
+      const [result] = await connection.execute(`SELECT * FROM evidence ${where} ORDER BY created_at DESC`, params);
+      return result;
+    });
 
     res.json({ success: true, data: rows });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Error listando evidencias', error: err.message });
+    sendControllerError(res, err, 'Error listando evidencias');
   }
 };
 

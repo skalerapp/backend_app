@@ -1,6 +1,6 @@
 const db = require('../../config/database');
-
-const pool = db.pool;
+const { withDbConnection } = db;
+const { sendControllerError } = require('../../utils/httpError');
 
 const ALLOWED_ENTITY_TYPES = new Set([
   'users',
@@ -111,23 +111,26 @@ const listAuditLogs = async (req, res) => {
 
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const connection = await pool.getConnection();
+    const { rows, total } = await withDbConnection(async (connection) => {
+      const [countRows] = await connection.execute(
+        `SELECT COUNT(*) AS total FROM audit_logs ${whereClause}`,
+        params
+      );
 
-    const [countRows] = await connection.execute(
-      `SELECT COUNT(*) AS total FROM audit_logs ${whereClause}`,
-      params
-    );
+      const [result] = await connection.execute(
+        `SELECT id, user_id, action, entity_type, entity_id, old_values, new_values, changed_fields, ip_address, created_at
+         FROM audit_logs
+         ${whereClause}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ? OFFSET ?`,
+        [...params, limit, offset]
+      );
 
-    const [rows] = await connection.execute(
-      `SELECT id, user_id, action, entity_type, entity_id, old_values, new_values, changed_fields, ip_address, created_at
-       FROM audit_logs
-       ${whereClause}
-       ORDER BY created_at DESC, id DESC
-       LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
-    );
-
-    connection.release();
+      return {
+        rows: result,
+        total: countRows[0]?.total || 0,
+      };
+    });
 
     res.json({
       success: true,
@@ -135,16 +138,11 @@ const listAuditLogs = async (req, res) => {
       meta: {
         page,
         limit,
-        total: countRows[0]?.total || 0,
+        total,
       },
     });
   } catch (error) {
-    console.error('listAuditLogs error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al listar auditoría',
-      error: error.message,
-    });
+    sendControllerError(res, error, 'Error al listar auditoría');
   }
 };
 

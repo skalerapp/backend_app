@@ -1,6 +1,7 @@
 const db = require('../../config/database');
-const pool = db.pool;
+const { withDbConnection } = db;
 const { applyAuditContext } = require('../../utils/auditContext');
+const { HttpError, sendControllerError } = require('../../utils/httpError');
 
 const normalizeEmployeeStatus = (statusValue) => (statusValue || '').toString().trim().toLowerCase();
 const normalizeDateValue = (value) => {
@@ -32,52 +33,53 @@ const ensureLaborPermissionsTable = async (connection) => {
 
 const getLaborPermissions = async (req, res) => {
   try {
-    const connection = await pool.getConnection();
-    await ensureLaborPermissionsTable(connection);
+    const rows = await withDbConnection(async (connection) => {
+      await ensureLaborPermissionsTable(connection);
 
-    const [rows] = await connection.execute(
-      `SELECT lp.*, e.position, e.department, e.status AS employee_status,
-              COALESCE(u.name, e.employee_name, CONCAT('Colaborador #', lp.employee_id)) AS employee_name
-       FROM labor_permissions lp
-       LEFT JOIN employees e ON lp.employee_id = e.id
-       LEFT JOIN users u ON e.user_id = u.id
-       ORDER BY lp.created_at DESC`
-    );
+      const [result] = await connection.execute(
+        `SELECT lp.*, e.position, e.department, e.status AS employee_status,
+                COALESCE(u.name, e.employee_name, CONCAT('Colaborador #', lp.employee_id)) AS employee_name
+         FROM labor_permissions lp
+         LEFT JOIN employees e ON lp.employee_id = e.id
+         LEFT JOIN users u ON e.user_id = u.id
+         ORDER BY lp.created_at DESC`
+      );
 
-    connection.release();
+      return result;
+    });
+
     res.json({ success: true, data: rows });
   } catch (error) {
-    console.error('getLaborPermissions error:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener permisos laborales', error: error.message });
+    sendControllerError(res, error, 'Error al obtener permisos laborales');
   }
 };
 
 const getLaborPermissionById = async (req, res) => {
   try {
     const { id } = req.params;
-    const connection = await pool.getConnection();
-    await ensureLaborPermissionsTable(connection);
+    const row = await withDbConnection(async (connection) => {
+      await ensureLaborPermissionsTable(connection);
 
-    const [rows] = await connection.execute(
-      `SELECT lp.*, e.position, e.department, e.status AS employee_status,
-              COALESCE(u.name, e.employee_name, CONCAT('Colaborador #', lp.employee_id)) AS employee_name
-       FROM labor_permissions lp
-       LEFT JOIN employees e ON lp.employee_id = e.id
-       LEFT JOIN users u ON e.user_id = u.id
-       WHERE lp.id = ?`,
-      [id]
-    );
+      const [rows] = await connection.execute(
+        `SELECT lp.*, e.position, e.department, e.status AS employee_status,
+                COALESCE(u.name, e.employee_name, CONCAT('Colaborador #', lp.employee_id)) AS employee_name
+         FROM labor_permissions lp
+         LEFT JOIN employees e ON lp.employee_id = e.id
+         LEFT JOIN users u ON e.user_id = u.id
+         WHERE lp.id = ?`,
+        [id]
+      );
 
-    connection.release();
+      return rows[0] || null;
+    });
 
-    if (rows.length === 0) {
+    if (!row) {
       return res.status(404).json({ success: false, message: 'Permiso laboral no encontrado' });
     }
 
-    res.json({ success: true, data: rows[0] });
+    res.json({ success: true, data: row });
   } catch (error) {
-    console.error('getLaborPermissionById error:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener permiso laboral', error: error.message });
+    sendControllerError(res, error, 'Error al obtener permiso laboral');
   }
 };
 
@@ -92,55 +94,47 @@ const createLaborPermission = async (req, res) => {
       });
     }
 
-    const connection = await pool.getConnection();
-    await ensureLaborPermissionsTable(connection);
+    const laborPermissionId = await withDbConnection(async (connection) => {
+      await ensureLaborPermissionsTable(connection);
 
-    const [employeeRows] = await connection.execute(
-      'SELECT id, status FROM employees WHERE id = ? LIMIT 1',
-      [employee_id]
-    );
+      const [employeeRows] = await connection.execute(
+        'SELECT id, status FROM employees WHERE id = ? LIMIT 1',
+        [employee_id]
+      );
 
-    if (employeeRows.length === 0) {
-      connection.release();
-      return res.status(404).json({
-        success: false,
-        message: 'Colaborador no encontrado'
-      });
-    }
+      if (employeeRows.length === 0) {
+        throw new HttpError(404, 'Colaborador no encontrado');
+      }
 
-    const employeeStatus = normalizeEmployeeStatus(employeeRows[0].status);
-    if (employeeStatus !== 'active') {
-      connection.release();
-      return res.status(400).json({
-        success: false,
-        message: 'Solo se pueden registrar permisos para colaboradores activos'
-      });
-    }
+      const employeeStatus = normalizeEmployeeStatus(employeeRows[0].status);
+      if (employeeStatus !== 'active') {
+        throw new HttpError(400, 'Solo se pueden registrar permisos para colaboradores activos');
+      }
 
-    await applyAuditContext(connection, req);
-    const [result] = await connection.execute(
-      `INSERT INTO labor_permissions (employee_id, permission_type, start_date, end_date, reason, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-      [
-        employee_id,
-        permission_type || null,
-        start_date,
-        end_date,
-        reason || null,
-        status || 'pending'
-      ]
-    );
+      await applyAuditContext(connection, req);
+      const [result] = await connection.execute(
+        `INSERT INTO labor_permissions (employee_id, permission_type, start_date, end_date, reason, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          employee_id,
+          permission_type || null,
+          start_date,
+          end_date,
+          reason || null,
+          status || 'pending'
+        ]
+      );
 
-    connection.release();
+      return result.insertId;
+    });
 
     res.status(201).json({
       success: true,
       message: 'Permiso laboral creado',
-      laborPermissionId: result.insertId
+      laborPermissionId
     });
   } catch (error) {
-    console.error('createLaborPermission error:', error);
-    res.status(500).json({ success: false, message: 'Error al crear permiso laboral', error: error.message });
+    sendControllerError(res, error, 'Error al crear permiso laboral');
   }
 };
 
@@ -149,125 +143,104 @@ const updateLaborPermission = async (req, res) => {
     const { id } = req.params;
     const { employee_id, permission_type, start_date, end_date, reason, status } = req.body;
 
-    const connection = await pool.getConnection();
-    await ensureLaborPermissionsTable(connection);
+    await withDbConnection(async (connection) => {
+      await ensureLaborPermissionsTable(connection);
 
-    const [existingRows] = await connection.execute(
-      'SELECT * FROM labor_permissions WHERE id = ?',
-      [id]
-    );
-
-    if (existingRows.length === 0) {
-      connection.release();
-      return res.status(404).json({ success: false, message: 'Permiso laboral no encontrado' });
-    }
-
-    const existing = existingRows[0];
-
-    if (existing.status === 'approved') {
-      const requestedStatus = status ?? existing.status;
-      if (requestedStatus !== 'approved' && requestedStatus !== 'rejected') {
-        connection.release();
-        return res.status(400).json({
-          success: false,
-          message: 'Permiso aprobado: solo puede mantenerse aprobado o pasar a rechazado'
-        });
-      }
-
-      const currentPermissionType = existing.permission_type ?? null;
-      const currentStartDate = normalizeDateValue(existing.start_date);
-      const currentEndDate = normalizeDateValue(existing.end_date);
-      const currentReason = existing.reason ?? null;
-      const currentEmployeeId = Number(existing.employee_id);
-
-      const requestedPermissionType = permission_type ?? currentPermissionType;
-      const requestedStartDate = normalizeDateValue(start_date ?? currentStartDate);
-      const requestedEndDate = normalizeDateValue(end_date ?? currentEndDate);
-      const requestedReason = reason ?? currentReason;
-      const requestedEmployeeId = Number(employee_id ?? currentEmployeeId);
-
-      const nonStatusChanged =
-        requestedEmployeeId !== currentEmployeeId ||
-        requestedPermissionType !== currentPermissionType ||
-        requestedStartDate !== currentStartDate ||
-        requestedEndDate !== currentEndDate ||
-        requestedReason !== currentReason;
-
-      if (nonStatusChanged) {
-        connection.release();
-        return res.status(400).json({
-          success: false,
-          message: 'Permiso aprobado: no se pueden modificar colaborador, tipo, fechas ni motivo'
-        });
-      }
-    }
-
-    const nextEmployeeId = employee_id ?? existing.employee_id;
-    const employeeChanged = Number(nextEmployeeId) !== Number(existing.employee_id);
-
-    if (employeeChanged) {
-      const [employeeRows] = await connection.execute(
-        'SELECT id, status FROM employees WHERE id = ? LIMIT 1',
-        [nextEmployeeId]
+      const [existingRows] = await connection.execute(
+        'SELECT * FROM labor_permissions WHERE id = ?',
+        [id]
       );
 
-      if (employeeRows.length === 0) {
-        connection.release();
-        return res.status(404).json({
-          success: false,
-          message: 'Colaborador no encontrado'
-        });
+      if (existingRows.length === 0) {
+        throw new HttpError(404, 'Permiso laboral no encontrado');
       }
 
-      const employeeStatus = normalizeEmployeeStatus(employeeRows[0].status);
-      if (employeeStatus !== 'active') {
-        connection.release();
-        return res.status(400).json({
-          success: false,
-          message: 'Solo se pueden asignar permisos a colaboradores activos'
-        });
+      const existing = existingRows[0];
+
+      if (existing.status === 'approved') {
+        const requestedStatus = status ?? existing.status;
+        if (requestedStatus !== 'approved' && requestedStatus !== 'rejected') {
+          throw new HttpError(400, 'Permiso aprobado: solo puede mantenerse aprobado o pasar a rechazado');
+        }
+
+        const currentPermissionType = existing.permission_type ?? null;
+        const currentStartDate = normalizeDateValue(existing.start_date);
+        const currentEndDate = normalizeDateValue(existing.end_date);
+        const currentReason = existing.reason ?? null;
+        const currentEmployeeId = Number(existing.employee_id);
+
+        const requestedPermissionType = permission_type ?? currentPermissionType;
+        const requestedStartDate = normalizeDateValue(start_date ?? currentStartDate);
+        const requestedEndDate = normalizeDateValue(end_date ?? currentEndDate);
+        const requestedReason = reason ?? currentReason;
+        const requestedEmployeeId = Number(employee_id ?? currentEmployeeId);
+
+        const nonStatusChanged =
+          requestedEmployeeId !== currentEmployeeId ||
+          requestedPermissionType !== currentPermissionType ||
+          requestedStartDate !== currentStartDate ||
+          requestedEndDate !== currentEndDate ||
+          requestedReason !== currentReason;
+
+        if (nonStatusChanged) {
+          throw new HttpError(400, 'Permiso aprobado: no se pueden modificar colaborador, tipo, fechas ni motivo');
+        }
       }
-    }
 
-    await applyAuditContext(connection, req);
-    await connection.execute(
-      `UPDATE labor_permissions
-       SET employee_id = ?, permission_type = ?, start_date = ?, end_date = ?, reason = ?, status = ?, updated_at = NOW()
-       WHERE id = ?`,
-      [
-        employee_id ?? existing.employee_id,
-        permission_type ?? existing.permission_type,
-        start_date ?? existing.start_date,
-        end_date ?? existing.end_date,
-        reason ?? existing.reason,
-        status ?? existing.status,
-        id
-      ]
-    );
+      const nextEmployeeId = employee_id ?? existing.employee_id;
+      const employeeChanged = Number(nextEmployeeId) !== Number(existing.employee_id);
 
-    connection.release();
+      if (employeeChanged) {
+        const [employeeRows] = await connection.execute(
+          'SELECT id, status FROM employees WHERE id = ? LIMIT 1',
+          [nextEmployeeId]
+        );
+
+        if (employeeRows.length === 0) {
+          throw new HttpError(404, 'Colaborador no encontrado');
+        }
+
+        const employeeStatus = normalizeEmployeeStatus(employeeRows[0].status);
+        if (employeeStatus !== 'active') {
+          throw new HttpError(400, 'Solo se pueden asignar permisos a colaboradores activos');
+        }
+      }
+
+      await applyAuditContext(connection, req);
+      await connection.execute(
+        `UPDATE labor_permissions
+         SET employee_id = ?, permission_type = ?, start_date = ?, end_date = ?, reason = ?, status = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [
+          employee_id ?? existing.employee_id,
+          permission_type ?? existing.permission_type,
+          start_date ?? existing.start_date,
+          end_date ?? existing.end_date,
+          reason ?? existing.reason,
+          status ?? existing.status,
+          id
+        ]
+      );
+    });
 
     res.json({ success: true, message: 'Permiso laboral actualizado' });
   } catch (error) {
-    console.error('updateLaborPermission error:', error);
-    res.status(500).json({ success: false, message: 'Error al actualizar permiso laboral', error: error.message });
+    sendControllerError(res, error, 'Error al actualizar permiso laboral');
   }
 };
 
 const deleteLaborPermission = async (req, res) => {
   try {
     const { id } = req.params;
-    const connection = await pool.getConnection();
-    await ensureLaborPermissionsTable(connection);
-
-    await applyAuditContext(connection, req);
-    await connection.execute('DELETE FROM labor_permissions WHERE id = ?', [id]);
-    connection.release();
+    await withDbConnection(async (connection) => {
+      await ensureLaborPermissionsTable(connection);
+      await applyAuditContext(connection, req);
+      await connection.execute('DELETE FROM labor_permissions WHERE id = ?', [id]);
+    });
 
     res.json({ success: true, message: 'Permiso laboral eliminado' });
   } catch (error) {
-    console.error('deleteLaborPermission error:', error);
-    res.status(500).json({ success: false, message: 'Error al eliminar permiso laboral', error: error.message });
+    sendControllerError(res, error, 'Error al eliminar permiso laboral');
   }
 };
 

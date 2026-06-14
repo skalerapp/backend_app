@@ -1,4 +1,5 @@
 const mysql = require('mysql2/promise');
+const { withConnection } = require('../utils/withConnection');
 
 const parseBoolean = (value, fallback = false) => {
   if (value == null) return fallback;
@@ -91,8 +92,13 @@ async function closeDatabase() {
   console.log('🛑 Pool de MySQL cerrado');
 }
 
+async function withDbConnection(callback) {
+  return withConnection(pool, callback);
+}
+
 module.exports = {
   pool,
+  withDbConnection,
   testConnection,
   closeDatabase,
 };
