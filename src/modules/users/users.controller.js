@@ -86,12 +86,10 @@ const toApiUser = (row) => ({
 
 let usersRoleSchemaReadyPromise = null;
 
-const ensureUsersRoleSchema = async (connection) => {
-  if (usersRoleSchemaReadyPromise != null) {
-    return usersRoleSchemaReadyPromise;
-  }
-
-  usersRoleSchemaReadyPromise = (async () => {
+const runUsersRoleSchemaMigration = async (providedConnection) => {
+  const connection = providedConnection ?? await pool.getConnection();
+  const shouldRelease = !providedConnection;
+  try {
     try {
       await connection.execute("ALTER TABLE users MODIFY COLUMN role VARCHAR(50) NOT NULL DEFAULT 'employee'");
     } catch (e) {}
@@ -133,7 +131,20 @@ const ensureUsersRoleSchema = async (connection) => {
         END
       `);
     } catch (e) {}
-  })();
+  } finally {
+    if (shouldRelease) {
+      connection.release();
+    }
+  }
+};
+
+const ensureUsersRoleSchema = async (providedConnection) => {
+  if (usersRoleSchemaReadyPromise != null) {
+    await usersRoleSchemaReadyPromise;
+    return;
+  }
+
+  usersRoleSchemaReadyPromise = runUsersRoleSchemaMigration(providedConnection);
 
   try {
     await usersRoleSchemaReadyPromise;
@@ -146,8 +157,8 @@ const ensureUsersRoleSchema = async (connection) => {
 // Obtener todos los usuarios
 const getUsers = async (req, res) => {
   try {
+    await ensureUsersRoleSchema();
     const connection = await pool.getConnection();
-    await ensureUsersRoleSchema(connection);
     const [users] = await connection.execute(
       'SELECT id, email, name, role, status FROM users WHERE status = ? ORDER BY name ASC',
       ['active']
@@ -209,7 +220,7 @@ const createUser = async (req, res) => {
     }
 
     const connection = await pool.getConnection();
-    await ensureUsersRoleSchema(connection);
+    await ensureUsersRoleSchema();
 
     const [existingRows] = await connection.execute(
       'SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1',
@@ -324,7 +335,7 @@ const updateUser = async (req, res) => {
     }
 
     const connection = await pool.getConnection();
-    await ensureUsersRoleSchema(connection);
+    await ensureUsersRoleSchema();
 
     const [existingRows] = await connection.execute(
       'SELECT id FROM users WHERE id = ? LIMIT 1',

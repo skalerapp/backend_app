@@ -83,6 +83,22 @@ app.get('/api/health', (req, res) => {
   res.json({ success: true, message: 'Backend funcionando' });
 });
 
+app.get('/api/health/db', async (req, res) => {
+  try {
+    const { pool } = require('./config/database');
+    const connection = await pool.getConnection();
+    await connection.query('SELECT 1');
+    connection.release();
+    res.json({ success: true, message: 'Base de datos conectada' });
+  } catch (error) {
+    res.status(503).json({
+      success: false,
+      message: 'No se pudo conectar a la base de datos',
+      error: error?.message || String(error),
+    });
+  }
+});
+
 // Rutas
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);

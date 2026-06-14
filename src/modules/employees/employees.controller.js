@@ -12,31 +12,51 @@ const normalizeIdentification = (value) => {
   return value.toString().replace(/[^0-9A-Za-z]/g, '').toUpperCase();
 };
 
-const ensureEmployeeSchema = async (connection) => {
+let employeeSchemaReadyPromise = null;
+
+const runEmployeeSchemaMigration = async (providedConnection) => {
+  const connection = providedConnection ?? await pool.getConnection();
+  const shouldRelease = !providedConnection;
   try {
-    await connection.execute("ALTER TABLE employees ADD COLUMN identification_number VARCHAR(50)");
-  } catch (e) {
-    // ignore if column already exists
+    try {
+      await connection.execute("ALTER TABLE employees ADD COLUMN identification_number VARCHAR(50)");
+    } catch (e) {}
+
+    try {
+      await connection.execute('ALTER TABLE employees ADD COLUMN employee_name VARCHAR(255)');
+    } catch (e) {}
+
+    try {
+      await connection.execute('ALTER TABLE employees MODIFY COLUMN user_id INT NULL');
+    } catch (e) {}
+  } finally {
+    if (shouldRelease) {
+      connection.release();
+    }
+  }
+};
+
+const ensureEmployeeSchema = async (providedConnection) => {
+  if (employeeSchemaReadyPromise != null) {
+    await employeeSchemaReadyPromise;
+    return;
   }
 
-  try {
-    await connection.execute('ALTER TABLE employees ADD COLUMN employee_name VARCHAR(255)');
-  } catch (e) {
-    // ignore if column already exists
-  }
+  employeeSchemaReadyPromise = runEmployeeSchemaMigration(providedConnection);
 
   try {
-    await connection.execute('ALTER TABLE employees MODIFY COLUMN user_id INT NULL');
-  } catch (e) {
-    // ignore if already nullable or restricted by schema settings
+    await employeeSchemaReadyPromise;
+  } catch (error) {
+    employeeSchemaReadyPromise = null;
+    throw error;
   }
 };
 
 // Obtener todos los empleados
 const getEmployees = async (req, res) => {
   try {
+    await ensureEmployeeSchema();
     const connection = await pool.getConnection();
-    await ensureEmployeeSchema(connection);
     await ensureOperationalScopeShape(connection);
 
     const normalizedRole = normalizeRole(req.user?.role);
@@ -77,8 +97,8 @@ const getEmployees = async (req, res) => {
 const getEmployeeById = async (req, res) => {
   try {
     const { id } = req.params;
+    await ensureEmployeeSchema();
     const connection = await pool.getConnection();
-    await ensureEmployeeSchema(connection);
     const [employees] = await connection.execute(
       `SELECT
         e.*,
@@ -112,8 +132,8 @@ const createEmployee = async (req, res) => {
     const identificationRaw = identification_number?.toString().trim() || null;
     const normalizedIdentification = normalizeIdentification(identificationRaw);
 
+    await ensureEmployeeSchema();
     const connection = await pool.getConnection();
-    await ensureEmployeeSchema(connection);
 
     if (normalizedIdentification) {
       const [existingRows] = await connection.execute(
@@ -154,8 +174,8 @@ const updateEmployee = async (req, res) => {
     const normalizedUserId = user_id === undefined || user_id === null || user_id === '' ? null : user_id;
     const identificationRaw = identification_number?.toString().trim() || null;
     const normalizedIdentification = normalizeIdentification(identificationRaw);
+    await ensureEmployeeSchema();
     const connection = await pool.getConnection();
-    await ensureEmployeeSchema(connection);
 
     if (normalizedIdentification) {
       const [existingRows] = await connection.execute(

@@ -160,7 +160,7 @@ const login = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error en login',
-      error: error.message
+      error: error?.message || String(error),
     });
   }
 };
