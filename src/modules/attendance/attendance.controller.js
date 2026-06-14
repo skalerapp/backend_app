@@ -439,7 +439,7 @@ const checkInAttendance = async (req, res) => {
         }
       }
 
-      if ((normalizedRole === 'employee' || normalizedRole === 'commercial') && employee_id) {
+      if ((normalizedRole === 'employee' || normalizedRole === 'commercial' || normalizedRole === 'warehouse_logistics' || normalizedRole === 'hse') && employee_id) {
         const [ownedEmployee] = await connection.execute(
           'SELECT id FROM employees WHERE id = ? AND user_id = ? LIMIT 1',
           [employee_id, req.user.id]
@@ -519,7 +519,7 @@ const checkOutAttendance = async (req, res) => {
       const existing = rows[0];
       const ownerUserId = Number(existing.user_id || existing.employee_user_id || 0);
 
-      if (normalizedRole === 'employee') {
+      if (normalizedRole === 'employee' || normalizedRole === 'warehouse_logistics' || normalizedRole === 'hse') {
         const [ownedRows] = await connection.execute(
           `SELECT a.id
            FROM attendance a

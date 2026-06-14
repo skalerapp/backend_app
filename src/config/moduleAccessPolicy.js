@@ -99,6 +99,12 @@ const MODULE_ACCESS_POLICY = {
     tasks: ['read'],
     performance: ['read'],
   },
+  hse: {
+    attendance: ['read', 'create', 'update'],
+    hse: ['read', 'create', 'update', 'delete'],
+    projects: ['read'],
+    employees: ['read'],
+  },
 };
 
 module.exports = {

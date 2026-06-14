@@ -58,6 +58,12 @@ const normalizeRequestedRole = (roleValue) => {
     case 'ejecutivo_comercial':
     case 'commercial_advisor':
       return 'commercial';
+    case 'hse':
+    case 'salud_ocupacional':
+    case 'seguridad_industrial':
+    case 'health_safety':
+    case 'health_and_safety':
+      return 'hse';
     default:
       return raw;
   }
@@ -127,6 +133,7 @@ const runUsersRoleSchemaMigration = async (providedConnection) => {
           ) THEN 'warehouse_logistics'
           WHEN LOWER(TRIM(role)) IN ('management') THEN 'gerencial'
           WHEN LOWER(TRIM(role)) IN ('commercial', 'comercial', 'asesor_comercial', 'ejecutivo_comercial', 'commercial_advisor') THEN 'commercial'
+          WHEN LOWER(TRIM(role)) IN ('hse', 'salud_ocupacional', 'seguridad_industrial', 'health_safety', 'health_and_safety') THEN 'hse'
           ELSE LOWER(TRIM(role))
         END
       `);
@@ -207,6 +214,7 @@ const createUser = async (req, res) => {
       'employee',
       'warehouse_logistics',
       'commercial',
+      'hse',
       'gerencial',
     ];
     if (!allowedRoles.includes(normalizedRole)) {
@@ -315,6 +323,7 @@ const updateUser = async (req, res) => {
       'employee',
       'warehouse_logistics',
       'commercial',
+      'hse',
       'gerencial',
     ];
     if (!allowedRoles.includes(normalizedRole)) {

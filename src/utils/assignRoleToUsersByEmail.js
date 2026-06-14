@@ -48,6 +48,7 @@ const run = async () => {
     'employee',
     'warehouse_logistics',
     'commercial',
+    'hse',
     'gerencial',
   ]);
 

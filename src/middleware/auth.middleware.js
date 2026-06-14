@@ -57,6 +57,12 @@ const normalizeRole = (roleValue) => {
     case 'ejecutivo_comercial':
     case 'commercial_advisor':
       return 'commercial';
+    case 'hse':
+    case 'salud_ocupacional':
+    case 'seguridad_industrial':
+    case 'health_safety':
+    case 'health_and_safety':
+      return 'hse';
     default:
       return raw;
   }
