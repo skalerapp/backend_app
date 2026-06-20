@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { pool } = require('../../config/database');
+const { toSqlDatetime } = require('../../utils/datetime.utils');
 
 const authSessionSchemaState = {
   ready: false,
@@ -162,7 +163,7 @@ const createAppSession = async ({ user, deviceLabel = 'mobile-app' }) => {
 
   const jwtSessionId = createId(24);
   const expiresAt = addMilliseconds(new Date(), appSessionTtlMs());
-  const expiresAtSql = expiresAt.toISOString().slice(0, 19).replace('T', ' ');
+  const expiresAtSql = toSqlDatetime(expiresAt);
 
   const connection = await pool.getConnection();
   try {
@@ -210,6 +211,7 @@ const createWebLaunchTicket = async ({ appSessionId, userId }) => {
 
   const ticketCode = createId(24);
   const expiresAt = addMilliseconds(new Date(), ticketTtlMs());
+  const expiresAtSql = toSqlDatetime(expiresAt);
   const launchUrl = buildLaunchUrl(ticketCode);
 
   const connection = await pool.getConnection();
@@ -235,7 +237,7 @@ const createWebLaunchTicket = async ({ appSessionId, userId }) => {
         )
         VALUES (?, ?, ?, ?, ?, ?)
       `,
-      [ticketCode, appSessionId, userId, TICKET_STATUS_PENDING, expiresAt, launchUrl],
+      [ticketCode, appSessionId, userId, TICKET_STATUS_PENDING, expiresAtSql, launchUrl],
     );
 
     return {
@@ -462,6 +464,7 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
     const expiresAt = appExpiry && appExpiry.getTime() > now.getTime()
       ? appExpiry
       : addMilliseconds(now, webSessionTtlMs());
+    const expiresAtSql = toSqlDatetime(expiresAt);
 
     await connection.execute(
       `
@@ -475,7 +478,7 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
         )
         VALUES (?, ?, ?, ?, NOW(), ?)
       `,
-      [jwtSessionId, ticket.app_session_id, ticket.user_id, SESSION_STATUS_ACTIVE, expiresAt],
+      [jwtSessionId, ticket.app_session_id, ticket.user_id, SESSION_STATUS_ACTIVE, expiresAtSql],
     );
 
     await connection.execute(

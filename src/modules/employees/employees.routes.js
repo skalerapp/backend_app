@@ -5,6 +5,7 @@ const { verifyToken, verifyModuleAccess } = require('../../middleware/auth.middl
 
 // Rutas de empleados
 router.get('/', verifyToken, verifyModuleAccess('employees', 'read'), employeeController.getEmployees);
+router.get('/linkable-app-users', verifyToken, verifyModuleAccess('employees', 'read'), employeeController.getLinkableAppUsers);
 router.get('/:id', verifyToken, verifyModuleAccess('employees', 'read'), employeeController.getEmployeeById);
 router.post('/', verifyToken, verifyModuleAccess('employees', 'create'), employeeController.createEmployee);
 router.put('/:id', verifyToken, verifyModuleAccess('employees', 'update'), employeeController.updateEmployee);

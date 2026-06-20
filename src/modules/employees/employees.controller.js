@@ -159,6 +159,19 @@ const createEmployee = async (req, res) => {
       }
     }
 
+    if (normalizedUserId) {
+      const [linkedRows] = await connection.execute(
+        'SELECT id FROM employees WHERE user_id = ? LIMIT 1',
+        [normalizedUserId],
+      );
+      if (linkedRows.length) {
+        return res.status(409).json({
+          success: false,
+          message: 'Ese usuario app ya está vinculado a otro colaborador',
+        });
+      }
+    }
+
     await applyAuditContext(connection, req);
     const [result] = await connection.execute(
       `INSERT INTO employees (user_id, employee_name, identification_number, position, department, salary, hire_date, status, created_at)
@@ -206,6 +219,19 @@ const updateEmployee = async (req, res) => {
       }
     }
 
+    if (normalizedUserId) {
+      const [linkedRows] = await connection.execute(
+        'SELECT id FROM employees WHERE user_id = ? AND id <> ? LIMIT 1',
+        [normalizedUserId, id],
+      );
+      if (linkedRows.length) {
+        return res.status(409).json({
+          success: false,
+          message: 'Ese usuario app ya está vinculado a otro colaborador',
+        });
+      }
+    }
+
     await applyAuditContext(connection, req);
     await connection.execute(
       `UPDATE employees SET user_id = ?, employee_name = ?, identification_number = ?, position = ?, department = ?, salary = ?, hire_date = ?, status = ?, updated_at = NOW()
@@ -244,9 +270,56 @@ const deleteEmployee = async (req, res) => {
   }
 };
 
+const getLinkableAppUsers = async (req, res) => {
+  let connection;
+  try {
+    await ensureEmployeeSchema();
+    connection = await pool.getConnection();
+
+    const excludeEmployeeId = req.query.exclude_employee_id
+      ? Number(req.query.exclude_employee_id)
+      : null;
+    const params = [];
+    let excludeClause = '';
+
+    if (Number.isFinite(excludeEmployeeId) && excludeEmployeeId > 0) {
+      excludeClause = 'AND e.id <> ?';
+      params.push(excludeEmployeeId);
+    }
+
+    const [users] = await connection.execute(
+      `SELECT u.id, u.email, u.name, u.role, u.status
+       FROM users u
+       WHERE u.status = 'active'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM employees e
+           WHERE e.user_id = u.id
+           ${excludeClause}
+         )
+       ORDER BY u.name ASC`,
+      params,
+    );
+
+    res.json({ success: true, data: users });
+  } catch (error) {
+    console.error('getLinkableAppUsers error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener usuarios disponibles para vincular',
+      error: error.message,
+    });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+};
+
 module.exports = {
   getEmployees,
   getEmployeeById,
+  getLinkableAppUsers,
   createEmployee,
   updateEmployee,
   deleteEmployee,

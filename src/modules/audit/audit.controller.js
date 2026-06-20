@@ -1,21 +1,9 @@
 const db = require('../../config/database');
 const { withDbConnection } = db;
 const { sendControllerError } = require('../../utils/httpError');
+const { auditedTables } = require('../../utils/installAuditTriggers');
 
-const ALLOWED_ENTITY_TYPES = new Set([
-  'users',
-  'projects',
-  'employees',
-  'activities',
-  'labor_permissions',
-  'attendance',
-  'project_collaborators',
-  'project_allowances',
-  'allowance_expenses',
-  'allowance_requests',
-  'project_material_items',
-  'material_consumptions',
-]);
+const ALLOWED_ENTITY_TYPES = new Set(auditedTables.map((table) => table.entityType));
 
 const ALLOWED_ACTIONS = new Set(['INSERT', 'UPDATE', 'DELETE']);
 
@@ -35,15 +23,40 @@ const parseJsonField = (value) => {
   }
 };
 
+const normalizeChangedFields = (value) => {
+  const parsed = parseJsonField(value);
+  if (!Array.isArray(parsed)) {
+    if (parsed == null || parsed === '') return [];
+    return [parsed.toString()];
+  }
+
+  const flat = [];
+  const queue = [...parsed];
+  while (queue.length > 0) {
+    const item = queue.shift();
+    if (item == null) continue;
+    if (Array.isArray(item)) {
+      queue.unshift(...item);
+      continue;
+    }
+    const text = item.toString().trim();
+    if (text) flat.push(text);
+  }
+
+  return [...new Set(fflat)];
+};
+
 const toAuditLog = (row) => ({
   id: row.id,
   user_id: row.user_id,
+  user_name: row.user_name ?? null,
+  user_email: row.user_email ?? null,
   action: row.action,
   entity_type: row.entity_type,
   entity_id: row.entity_id,
   old_values: parseJsonField(row.old_values),
   new_values: parseJsonField(row.new_values),
-  changed_fields: parseJsonField(row.changed_fields),
+  changed_fields: normalizeChangedFields(row.changed_fields),
   ip_address: row.ip_address,
   created_at: row.created_at,
 });
@@ -61,7 +74,7 @@ const listAuditLogs = async (req, res) => {
     if (requestedEntityType && !ALLOWED_ENTITY_TYPES.has(requestedEntityType)) {
       return res.status(400).json({
         success: false,
-        message: 'entity_type inválido',
+        message: `entity_type inválido. Valores permitidos: ${[...ALLOWED_ENTITY_TYPES].sort().join(', ')}`,
       });
     }
 
@@ -90,22 +103,22 @@ const listAuditLogs = async (req, res) => {
     const params = [];
 
     if (requestedEntityType) {
-      conditions.push('entity_type = ?');
+      conditions.push('al.entity_type = ?');
       params.push(requestedEntityType);
     }
 
     if (requestedAction) {
-      conditions.push('action = ?');
+      conditions.push('al.action = ?');
       params.push(requestedAction);
     }
 
     if (entityId) {
-      conditions.push('entity_id = ?');
+      conditions.push('al.entity_id = ?');
       params.push(entityId);
     }
 
     if (userId) {
-      conditions.push('user_id = ?');
+      conditions.push('al.user_id = ?');
       params.push(userId);
     }
 
@@ -113,22 +126,34 @@ const listAuditLogs = async (req, res) => {
 
     const { rows, total } = await withDbConnection(async (connection) => {
       const [countRows] = await connection.execute(
-        `SELECT COUNT(*) AS total FROM audit_logs ${whereClause}`,
+        `SELECT COUNT(*) AS total FROM audit_logs al ${whereClause}`,
         params
       );
 
       const [result] = await connection.execute(
-        `SELECT id, user_id, action, entity_type, entity_id, old_values, new_values, changed_fields, ip_address, created_at
-         FROM audit_logs
+        `SELECT
+           al.id,
+           al.user_id,
+           u.name AS user_name,
+           u.email AS user_email,
+           al.action,
+           al.entity_type,
+           al.entity_id,
+           al.old_values,
+           al.new_values,
+           al.changed_fields,
+           al.ip_address,
+           al.created_at
+         FROM audit_logs al
+         LEFT JOIN users u ON u.id = al.user_id
          ${whereClause}
-         ORDER BY created_at DESC, id DESC
-         LIMIT ? OFFSET ?`,
-        [...params, limit, offset]
+         ORDER BY al.created_at DESC, al.id DESC
+         LIMIT ${limit} OFFSET ${offset}`
       );
 
       return {
         rows: result,
-        total: countRows[0]?.total || 0,
+        total: Number(countRows[0]?.total ?? 0),
       };
     });
 
@@ -148,4 +173,5 @@ const listAuditLogs = async (req, res) => {
 
 module.exports = {
   listAuditLogs,
+  ALLOWED_ENTITY_TYPES,
 };

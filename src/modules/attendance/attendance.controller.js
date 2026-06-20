@@ -103,7 +103,8 @@ const ATTENDANCE_SELECT_FIELDS = `
   SELECT
     a.id,
     a.employee_id,
-    COALESCE(a.user_id, e.user_id) AS user_id,
+    COALESCE(a.user_id, e.user_id, e_by_user.user_id) AS user_id,
+    COALESCE(a.employee_id, e_by_user.id) AS resolved_employee_id,
     a.project_id,
     a.check_in,
     a.check_out,
@@ -118,16 +119,60 @@ const ATTENDANCE_SELECT_FIELDS = `
     a.unproductive_reason,
     a.created_at,
     a.updated_at,
-    p.name AS project_name,
-    COALESCE(e.identification_number, '') AS identification_number,
-    COALESCE(e.position, '') AS employee_position,
-    COALESCE(e.department, '') AS employee_department,
-    COALESCE(e.employee_name, user_direct.name, u.name) AS employee_name,
+    COALESCE(NULLIF(TRIM(p.name), ''), '') AS project_name,
+    COALESCE(NULLIF(TRIM(p.ot_code), ''), '') AS project_ot_code,
+    COALESCE(
+      NULLIF(TRIM(e.identification_number), ''),
+      NULLIF(TRIM(e_by_user.identification_number), ''),
+      ''
+    ) AS identification_number,
+    COALESCE(
+      NULLIF(TRIM(e.position), ''),
+      NULLIF(TRIM(e_by_user.position), ''),
+      ''
+    ) AS employee_position,
+    COALESCE(
+      NULLIF(TRIM(e.department), ''),
+      NULLIF(TRIM(e_by_user.department), ''),
+      ''
+    ) AS employee_department,
+    COALESCE(
+      NULLIF(TRIM(e.employee_name), ''),
+      NULLIF(TRIM(e_by_user.employee_name), ''),
+      NULLIF(TRIM(user_direct.name), ''),
+      NULLIF(TRIM(u.name), '')
+    ) AS employee_name,
     COALESCE(user_direct.name, u.name) AS app_user_name,
-    COALESCE(user_direct.email, u.email) AS app_user_email
+    COALESCE(user_direct.email, u.email) AS app_user_email,
+    COALESCE(user_direct.role, u.role, '') AS app_user_role,
+    CASE
+      WHEN a.project_id IS NULL THEN 'Sin proyecto en registro'
+      WHEN COALESCE(a.employee_id, e_by_user.id) IS NULL THEN 'Usuario sin ficha de colaborador'
+      WHEN EXISTS (
+        SELECT 1
+        FROM project_collaborators pc
+        WHERE pc.project_id = a.project_id
+          AND pc.employee_id = COALESCE(a.employee_id, e_by_user.id)
+      ) THEN 'Sí'
+      ELSE 'No'
+    END AS project_assignment_status,
+    (
+      SELECT GROUP_CONCAT(
+        DISTINCT CONCAT(
+          COALESCE(NULLIF(TRIM(p2.ot_code), ''), CONCAT('OT', p2.id)),
+          IF(p2.name IS NOT NULL AND TRIM(p2.name) <> '', CONCAT(' - ', p2.name), '')
+        )
+        ORDER BY p2.name
+        SEPARATOR ' | '
+      )
+      FROM project_collaborators pc2
+      INNER JOIN projects p2 ON p2.id = pc2.project_id
+      WHERE pc2.employee_id = COALESCE(a.employee_id, e_by_user.id)
+    ) AS assigned_projects
   FROM attendance a
   LEFT JOIN projects p ON a.project_id = p.id
   LEFT JOIN employees e ON a.employee_id = e.id
+  LEFT JOIN employees e_by_user ON a.user_id IS NOT NULL AND e_by_user.user_id = a.user_id
   LEFT JOIN users user_direct ON a.user_id = user_direct.id
   LEFT JOIN users u ON e.user_id = u.id
 `;

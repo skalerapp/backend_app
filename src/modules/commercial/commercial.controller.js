@@ -1146,6 +1146,7 @@ const mapCommercialClientRow = (row) => {
     profile_complete: profile.profile_complete,
     missing_fields: profile.missing_fields,
     created_by: row.created_by,
+    created_by_name: row.created_by_name ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -1182,6 +1183,123 @@ const attachNearbyPlacesToVisit = async (connection, visitId, nearbyPlaces = [],
   }
 
   return saved;
+};
+
+const syncNearbyPlacesForVisit = async (connection, visitId, nearbyPlaces = [], userId = null) => {
+  if (!visitId || !Array.isArray(nearbyPlaces)) return [];
+
+  const normalizedPlaces = [];
+  for (const rawPlace of nearbyPlaces) {
+    const place = normalizeNearbyPlacePayload(rawPlace);
+    if (!place.name) continue;
+    normalizedPlaces.push({
+      id: normalizeNumber(rawPlace?.id),
+      ...place,
+    });
+  }
+
+  const [existingLinks] = await connection.execute(
+    `SELECT vnp.nearby_place_id
+     FROM visit_nearby_places vnp
+     WHERE vnp.visit_id = ?`,
+    [visitId],
+  );
+
+  const existingIds = new Set(existingLinks.map((row) => Number(row.nearby_place_id)));
+  const keptPlaceIds = new Set();
+  const saved = [];
+
+  for (const place of normalizedPlaces) {
+    if (place.id && existingIds.has(place.id)) {
+      await connection.execute(
+        `UPDATE nearby_places
+         SET name = ?, type = ?, address = ?, phone = ?, notes = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [place.name, place.type, place.address, place.phone, place.notes, place.id],
+      );
+      keptPlaceIds.add(place.id);
+      saved.push({
+        id: place.id,
+        name: place.name,
+        type: place.type,
+        address: place.address,
+        phone: place.phone,
+        notes: place.notes,
+      });
+      continue;
+    }
+
+    const [placeResult] = await connection.execute(
+      `INSERT INTO nearby_places (name, type, address, phone, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [place.name, place.type, place.address, place.phone, place.notes, userId],
+    );
+
+    await connection.execute(
+      'INSERT INTO visit_nearby_places (visit_id, nearby_place_id) VALUES (?, ?)',
+      [visitId, placeResult.insertId],
+    );
+
+    keptPlaceIds.add(Number(placeResult.insertId));
+    saved.push({ id: placeResult.insertId, ...place });
+  }
+
+  for (const placeId of existingIds) {
+    if (!keptPlaceIds.has(placeId)) {
+      await connection.execute(
+        'DELETE FROM visit_nearby_places WHERE visit_id = ? AND nearby_place_id = ?',
+        [visitId, placeId],
+      );
+    }
+  }
+
+  return saved;
+};
+
+const loadNearbyPlacesByVisitIds = async (connection, visitIds = []) => {
+  const normalizedVisitIds = [...new Set(
+    visitIds
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0),
+  )];
+  if (!normalizedVisitIds.length) return new Map();
+
+  const placeholders = normalizedVisitIds.map(() => '?').join(', ');
+  const [rows] = await connection.execute(
+    `SELECT vnp.visit_id, np.id, np.name, np.type, np.address, np.phone, np.notes
+     FROM visit_nearby_places vnp
+     INNER JOIN nearby_places np ON np.id = vnp.nearby_place_id
+     WHERE vnp.visit_id IN (${placeholders})
+     ORDER BY vnp.visit_id ASC, vnp.id ASC`,
+    normalizedVisitIds,
+  );
+
+  const grouped = new Map();
+  for (const row of rows) {
+    const visitId = Number(row.visit_id);
+    const place = {
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      address: row.address,
+      phone: row.phone,
+      notes: row.notes,
+    };
+    if (!grouped.has(visitId)) grouped.set(visitId, []);
+    grouped.get(visitId).push(place);
+  }
+
+  return grouped;
+};
+
+const enrichVisitsWithNearbyPlaces = async (connection, visits = []) => {
+  if (!Array.isArray(visits) || visits.length === 0) return visits;
+
+  const grouped = await loadNearbyPlacesByVisitIds(connection, visits.map((visit) => visit.id));
+  return visits.map((visit) => ({
+    ...visit,
+    nearby_places: grouped.get(Number(visit.id)) || [],
+  }));
 };
 
 const getNearbyPlacesForVisit = async (connection, visitId) => {
@@ -1550,7 +1668,12 @@ const getCommercialVisits = async (req, res) => {
       params,
     );
 
-    res.json({ success: true, data: rows.map((row) => mapVisitRow(row, req)) });
+    const visits = await enrichVisitsWithNearbyPlaces(
+      connection,
+      rows.map((row) => mapVisitRow(row, req)),
+    );
+
+    res.json({ success: true, data: visits });
   } catch (error) {
     console.error('getCommercialVisits error:', error);
     res.status(500).json({ success: false, message: 'Error al obtener visitas comerciales', error: error.message });
@@ -1936,7 +2059,10 @@ const getCommercialClientHistory = async (req, res) => {
       opportunityParams,
     );
 
-    const visits = visitRows.map((row) => mapVisitRow(row, req));
+    const visits = await enrichVisitsWithNearbyPlaces(
+      connection,
+      visitRows.map((row) => mapVisitRow(row, req)),
+    );
     const opportunities = opportunityRows.map(mapOpportunityRow);
     const lastVisit = visits[0] || null;
     const openOpportunities = opportunities.filter((item) => !['won', 'lost'].includes(item.stage));
@@ -2116,9 +2242,7 @@ const createCommercialVisit = async (req, res) => {
 
     const [rows] = await connection.execute(`${COMMERCIAL_VISIT_SELECT} WHERE cv.id = ?`, [result.insertId]);
     const visitRow = mapVisitRow(rows[0], req);
-    if (savedNearbyPlaces.length > 0) {
-      visitRow.nearby_places = savedNearbyPlaces;
-    }
+    visitRow.nearby_places = savedNearbyPlaces;
     const automationResult = await upsertOpportunityFromVisit({ connection, req, visit: visitRow });
     res.status(201).json({
       success: true,
@@ -2241,8 +2365,13 @@ const updateCommercialVisit = async (req, res) => {
       });
     }
 
-    if (Array.isArray(req.body.nearby_places) && req.body.nearby_places.length > 0) {
-      await attachNearbyPlacesToVisit(connection, Number(id), req.body.nearby_places, req.user?.id ?? null);
+    if (Array.isArray(req.body.nearby_places)) {
+      await syncNearbyPlacesForVisit(
+        connection,
+        Number(id),
+        req.body.nearby_places,
+        req.user?.id ?? null,
+      );
     }
 
     const [rows] = await connection.execute(`${COMMERCIAL_VISIT_SELECT} WHERE cv.id = ?`, [id]);
@@ -2299,7 +2428,12 @@ const listCommercialClients = async (req, res) => {
 
     const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
     const [rows] = await connection.execute(
-      `SELECT * FROM commercial_clients ${whereClause} ORDER BY business_name ASC, city ASC LIMIT 100`,
+      `SELECT cc.*, creator.name AS created_by_name
+       FROM commercial_clients cc
+       LEFT JOIN users creator ON creator.id = cc.created_by
+       ${whereClause}
+       ORDER BY cc.business_name ASC, cc.city ASC
+       LIMIT 500`,
       params,
     );
 

@@ -1,5 +1,6 @@
 const mysql = require('mysql2/promise');
 const { withConnection } = require('../utils/withConnection');
+const { resolveAppTimezoneOffset } = require('../utils/datetime.utils');
 
 const parseBoolean = (value, fallback = false) => {
   if (value == null) return fallback;
@@ -70,10 +71,36 @@ const dbConfig = {
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
   ssl: resolveSslConfig(),
+  timezone: resolveAppTimezoneOffset(),
 };
+
+const configurePoolTimezone = (poolInstance) => {
+  const timezoneOffset = resolveAppTimezoneOffset();
+  const underlyingPool = poolInstance.pool || poolInstance;
+  if (typeof underlyingPool.on !== 'function') return;
+
+  underlyingPool.on('connection', (connection) => {
+    connection.query(`SET time_zone = '${timezoneOffset}'`);
+  });
+};
+
 const pool = connectionString.length > 0
-  ? mysql.createPool(connectionString)
+  ? mysql.createPool({
+    uri: connectionString,
+    waitForConnections: true,
+    connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
+    queueLimit: Number(process.env.DB_QUEUE_LIMIT || 0),
+    acquireTimeout: Number(process.env.DB_ACQUIRE_TIMEOUT_MS || 15000),
+    maxIdle: Number(process.env.DB_MAX_IDLE || 10),
+    idleTimeout: Number(process.env.DB_IDLE_TIMEOUT_MS || 60000),
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+    ssl: resolveSslConfig(),
+    timezone: resolveAppTimezoneOffset(),
+  })
   : mysql.createPool(dbConfig);
+
+configurePoolTimezone(pool);
 
 // ✅ función para probar conexión (NO automática)
 async function testConnection() {
