@@ -329,6 +329,56 @@ describe('Commercial endpoints', () => {
     expect(res.body.data.area_contacts.cartera.name).toBe('Luis Cartera');
   });
 
+  it('GET /api/commercial/clients lets commercial users search the shared client directory', async () => {
+    const uniqueSuffix = Date.now();
+    const businessName = `Cliente Directorio ${uniqueSuffix}`;
+
+    const createdByAdmin = await request(app)
+      .post('/api/commercial/clients')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        client_type: 'juridica',
+        nit: `902${uniqueSuffix}`,
+        business_name: businessName,
+        city: 'Cali',
+        billing_email: 'facturacion@directorio.com',
+        contact_name: 'Ana Compras',
+        contact_phone: '3005551212',
+      });
+
+    expect(createdByAdmin.statusCode).toBe(201);
+
+    const commercialEmail = `commercial.search.${uniqueSuffix}@skaler.com`;
+    const createCommercialUser = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        name: `Comercial Search ${uniqueSuffix}`,
+        email: commercialEmail,
+        password: 'Pass1234!',
+        role: 'commercial',
+      });
+
+    expect(createCommercialUser.statusCode).toBe(201);
+
+    const commercialLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ email: commercialEmail, password: 'Pass1234!' });
+
+    expect(commercialLogin.statusCode).toBe(200);
+    expect(commercialLogin.body.token).toBeTruthy();
+
+    const searchRes = await request(app)
+      .get(`/api/commercial/clients?q=${encodeURIComponent(`Directorio ${uniqueSuffix}`)}`)
+      .set('Authorization', `Bearer ${commercialLogin.body.token}`);
+
+    expect(searchRes.statusCode).toBe(200);
+    expect(searchRes.body.success).toBe(true);
+    expect(
+      searchRes.body.data.some((client) => client.business_name === businessName),
+    ).toBe(true);
+  });
+
   it('POST /api/commercial/quotations creates a new quotation tied to a project', async () => {
     const res = await request(app)
       .post('/api/commercial/quotations')

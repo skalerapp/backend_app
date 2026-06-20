@@ -2404,26 +2404,9 @@ const listCommercialClients = async (req, res) => {
     const filters = [];
     const params = [];
     if (search) {
-      filters.push('(business_name LIKE ? OR nit LIKE ? OR city LIKE ?)');
+      filters.push('(business_name LIKE ? OR nit LIKE ? OR city LIKE ? OR contact_name LIKE ?)');
       const like = `%${search}%`;
-      params.push(like, like, like);
-    }
-
-    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
-    if (visitScope.clause) {
-      filters.push(`(
-        cc.id IN (
-          SELECT DISTINCT cv.client_id
-          FROM commercial_visits cv
-          WHERE cv.client_id IS NOT NULL AND ${visitScope.clause}
-        )
-        OR LOWER(TRIM(cc.business_name)) IN (
-          SELECT DISTINCT LOWER(TRIM(cv.client_name))
-          FROM commercial_visits cv
-          WHERE ${visitScope.clause}
-        )
-      )`);
-      params.push(...visitScope.params, ...visitScope.params);
+      params.push(like, like, like, like);
     }
 
     const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
@@ -2459,25 +2442,6 @@ const getCommercialClientById = async (req, res) => {
     const [rows] = await connection.execute('SELECT * FROM commercial_clients WHERE id = ? LIMIT 1', [clientId]);
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Cliente comercial no encontrado' });
-    }
-
-    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
-    if (visitScope.clause) {
-      const client = rows[0];
-      const [accessRows] = await connection.execute(
-        `SELECT cv.id
-         FROM commercial_visits cv
-         WHERE ${visitScope.clause}
-           AND (
-             cv.client_id = ?
-             OR LOWER(TRIM(cv.client_name)) = LOWER(TRIM(?))
-           )
-         LIMIT 1`,
-        [...visitScope.params, clientId, client.business_name],
-      );
-      if (!accessRows.length) {
-        return res.status(404).json({ success: false, message: 'Cliente comercial no encontrado' });
-      }
     }
 
     res.json({ success: true, data: mapCommercialClientRow(rows[0]) });
