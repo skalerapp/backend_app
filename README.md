@@ -137,6 +137,7 @@ GET http://localhost:3000/api/health
 | `/api/warehouse` | Almacén / activos |
 | `/api/operational-scopes` | Alcances operativos por rol |
 | `/api/commercial` | Comercial V2 (clientes, visitas, embudo, cotizaciones) |
+| `/api/app` | Versión mínima/requerida de la app móvil (`GET /version`, público) |
 | `/api/evidence` | Carga de evidencias |
 | `/api/audit-logs` | Auditoría |
 
@@ -146,6 +147,19 @@ GET http://localhost:3000/api/health
 - **Clientes**: `GET/POST /api/commercial/clients`, `PUT /api/commercial/clients/:id`, búsqueda con `?q=`.
 - **Cotizaciones**: consecutivo en tabla `counters` (`quotation`).
 - Permisos por rol en `src/config/moduleAccessPolicy.js`.
+
+### Versión de app móvil
+
+Endpoint público `GET /api/app/version`. Variables en Railway (plantilla: `.env.client.railway.example`):
+
+- `APP_VERSION_CHECK_ENABLED`, `APP_LATEST_*`, `APP_MIN_*`
+- `APP_ANDROID_DOWNLOAD_URL`, `APP_GITHUB_RELEASES_URL`
+
+Releases APK: repo `skalerapp/skaler-app-updates` — ver `documentation/APP_RELEASES_GITHUB.md`.
+
+### Almacén — migración MySQL
+
+`ensureWarehouseShape` usa `information_schema` para agregar columnas (MySQL 8 no soporta `ADD COLUMN IF NOT EXISTS`). Si ves error 500 en `/api/warehouse/assets`, despliega la versión actual de `warehouse.service.js`.
 
 ## Estructura del proyecto
 
