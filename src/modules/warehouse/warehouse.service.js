@@ -232,6 +232,22 @@ const shouldImportWarehouseAsset = (asset) => {
   return true;
 };
 
+const addColumnIfMissing = async (connection, tableName, columnName, columnDefinition) => {
+  const [rows] = await connection.execute(
+    `SELECT COUNT(*) AS total
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?`,
+    [tableName, columnName],
+  );
+  if (Number(rows[0]?.total || 0) === 0) {
+    await connection.execute(
+      `ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDefinition}`,
+    );
+  }
+};
+
 const ensureWarehouseShape = async (connection) => {
   await connection.execute(`
     CREATE TABLE IF NOT EXISTS warehouse_assets (
@@ -311,36 +327,33 @@ const ensureWarehouseShape = async (connection) => {
     )
   `);
 
-  await connection.execute(`
-    ALTER TABLE warehouse_asset_movements
-    ADD COLUMN IF NOT EXISTS evidence_path VARCHAR(500) NULL AFTER dispatch_note
-  `);
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'evidence_path', 'VARCHAR(500) NULL AFTER dispatch_note');
 
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS sku_code VARCHAR(80) NULL AFTER asset_code`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS category_name VARCHAR(120) NULL AFTER asset_name`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS unit_measure VARCHAR(60) NULL AFTER category_name`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS minimum_stock DECIMAL(12,2) NULL AFTER current_city`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS current_stock DECIMAL(12,2) NULL AFTER minimum_stock`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS vehicle_plate VARCHAR(40) NULL AFTER current_stock`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS vehicle_type VARCHAR(120) NULL AFTER vehicle_plate`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS insurance_due_date DATE NULL AFTER vehicle_type`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS soat_due_date DATE NULL AFTER insurance_due_date`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS technical_due_date DATE NULL AFTER soat_due_date`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS intake_origin VARCHAR(40) NOT NULL DEFAULT 'purchase' AFTER technical_detail`);
-  await connection.execute(`ALTER TABLE warehouse_assets ADD COLUMN IF NOT EXISTS intake_origin_project_id INT NULL AFTER intake_origin`);
+  await addColumnIfMissing(connection, 'warehouse_assets', 'sku_code', 'VARCHAR(80) NULL AFTER asset_code');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'category_name', 'VARCHAR(120) NULL AFTER asset_name');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'unit_measure', 'VARCHAR(60) NULL AFTER category_name');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'minimum_stock', 'DECIMAL(12,2) NULL AFTER current_city');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'current_stock', 'DECIMAL(12,2) NULL AFTER minimum_stock');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'vehicle_plate', 'VARCHAR(40) NULL AFTER current_stock');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'vehicle_type', 'VARCHAR(120) NULL AFTER vehicle_plate');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'insurance_due_date', 'DATE NULL AFTER vehicle_type');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'soat_due_date', 'DATE NULL AFTER insurance_due_date');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'technical_due_date', 'DATE NULL AFTER soat_due_date');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'intake_origin', "VARCHAR(40) NOT NULL DEFAULT 'purchase' AFTER technical_detail");
+  await addColumnIfMissing(connection, 'warehouse_assets', 'intake_origin_project_id', 'INT NULL AFTER intake_origin');
 
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS quantity DECIMAL(12,2) NULL AFTER evidence_path`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS serial_snapshot VARCHAR(160) NULL AFTER quantity`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS delivery_signature_name VARCHAR(160) NULL AFTER serial_snapshot`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS delivery_signature_data LONGTEXT NULL AFTER delivery_signature_name`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS receiving_signature_name VARCHAR(160) NULL AFTER delivery_signature_name`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS receiving_signature_data LONGTEXT NULL AFTER receiving_signature_name`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS vehicle_plate_snapshot VARCHAR(40) NULL AFTER receiving_signature_name`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS odometer_snapshot VARCHAR(80) NULL AFTER vehicle_plate_snapshot`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS fuel_level_snapshot VARCHAR(80) NULL AFTER odometer_snapshot`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS checklist_snapshot TEXT NULL AFTER fuel_level_snapshot`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS intake_origin VARCHAR(40) NOT NULL DEFAULT 'purchase' AFTER checklist_snapshot`);
-  await connection.execute(`ALTER TABLE warehouse_asset_movements ADD COLUMN IF NOT EXISTS intake_origin_project_id INT NULL AFTER intake_origin`);
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'quantity', 'DECIMAL(12,2) NULL AFTER evidence_path');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'serial_snapshot', 'VARCHAR(160) NULL AFTER quantity');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'delivery_signature_name', 'VARCHAR(160) NULL AFTER serial_snapshot');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'delivery_signature_data', 'LONGTEXT NULL AFTER delivery_signature_name');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'receiving_signature_name', 'VARCHAR(160) NULL AFTER delivery_signature_name');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'receiving_signature_data', 'LONGTEXT NULL AFTER receiving_signature_name');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'vehicle_plate_snapshot', 'VARCHAR(40) NULL AFTER receiving_signature_name');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'odometer_snapshot', 'VARCHAR(80) NULL AFTER vehicle_plate_snapshot');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'fuel_level_snapshot', 'VARCHAR(80) NULL AFTER odometer_snapshot');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'checklist_snapshot', 'TEXT NULL AFTER fuel_level_snapshot');
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'intake_origin', "VARCHAR(40) NOT NULL DEFAULT 'purchase' AFTER checklist_snapshot");
+  await addColumnIfMissing(connection, 'warehouse_asset_movements', 'intake_origin_project_id', 'INT NULL AFTER intake_origin');
 };
 
 const upsertWarehouseAsset = async (connection, asset) => {
