@@ -85,6 +85,9 @@ app.get('/api/health', (req, res) => {
   res.json({ success: true, message: 'Backend funcionando' });
 });
 
+const appRoutes = require('./modules/app/app.routes');
+app.use('/api/app', appRoutes);
+
 app.get('/api/health/db', async (req, res) => {
   let connection;
   try {
