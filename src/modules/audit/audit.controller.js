@@ -43,7 +43,7 @@ const normalizeChangedFields = (value) => {
     if (text) flat.push(text);
   }
 
-  return [...new Set(fflat)];
+  return [...new Set(flat)];
 };
 
 const toAuditLog = (row) => ({

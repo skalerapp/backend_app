@@ -479,7 +479,7 @@ const checkInAttendance = async (req, res) => {
         }
       }
 
-      if (employee_id && project_id && !canRegisterOthersWithoutProjectAssignment(normalizedRole)) {
+      if (employee_id && project_id) {
         const [assignmentRows] = await connection.execute(
           `SELECT 1
            FROM project_collaborators

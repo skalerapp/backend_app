@@ -36,6 +36,7 @@ const MODULE_ACCESS_POLICY = {
     dashboard: ['read'],
   },
   coordinator_operations: {
+    audit: ['read'],
     projects: ['read', 'create', 'update'],
     attendance: ['read', 'create', 'update'],
     employees: ['read'],
