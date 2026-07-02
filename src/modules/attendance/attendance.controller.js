@@ -245,6 +245,15 @@ const canExportHrAttendanceReport = (roleValue) => {
   return role === 'super_admin' || role === 'administrative';
 };
 
+const canRegisterOthersWithoutProjectAssignment = (roleValue) => {
+  const role = normalizeRole(roleValue);
+  return role === 'super_admin' ||
+    role === 'administrative' ||
+    role === 'coordinator_operations';
+};
+
+const canManageStaffAttendanceCheckout = (roleValue) => canRegisterOthersWithoutProjectAssignment(roleValue);
+
 const parseIsoDate = (value) => {
   if (!value) return null;
   const normalized = value.toString().trim();
@@ -470,7 +479,7 @@ const checkInAttendance = async (req, res) => {
         }
       }
 
-      if (employee_id && project_id) {
+      if (employee_id && project_id && !canRegisterOthersWithoutProjectAssignment(normalizedRole)) {
         const [assignmentRows] = await connection.execute(
           `SELECT 1
            FROM project_collaborators
@@ -578,10 +587,8 @@ const checkOutAttendance = async (req, res) => {
         }
       }
 
-      if (normalizedRole === 'administrative' || normalizedRole === 'coordinator_operations' || normalizedRole === 'gerencial' || normalizedRole === 'commercial') {
-        if (ownerUserId !== Number(req.user.id)) {
-          throw new HttpError(403, 'Solo puedes cerrar tu propia asistencia');
-        }
+      if ((normalizedRole === 'gerencial' || normalizedRole === 'commercial') && ownerUserId !== Number(req.user.id)) {
+        throw new HttpError(403, 'Solo puedes cerrar tu propia asistencia');
       }
 
       if (normalizedRole === 'leader' || normalizedRole === 'supervisor') {

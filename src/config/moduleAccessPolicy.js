@@ -38,6 +38,7 @@ const MODULE_ACCESS_POLICY = {
   coordinator_operations: {
     projects: ['read', 'create', 'update'],
     attendance: ['read', 'create', 'update'],
+    employees: ['read'],
     labor_permissions: ['read', 'create', 'update'],
     activities: ['read', 'create', 'update', 'delete'],
     allowances: ['read'],

@@ -64,6 +64,7 @@ describe('Evidence endpoints', () => {
 
     expect(res.statusCode).toBe(201);
     expect(res.body.success).toBe(true);
+    expect(res.body.file.path).toMatch(/^\/uploads\//);
     expect(res.body.file.path).toContain('projects/');
     expect(res.body.file.name).toBe('evidence-test.png');
     uploadedFileName = res.body.file.name;

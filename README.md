@@ -45,6 +45,8 @@ WEB_SESSION_EXPIRE=12h
 APP_SESSION_HEARTBEAT_TTL=90s
 ```
 
+> **Producción (Railway):** el disco del contenedor es efímero. Monta un [Railway Volume](https://docs.railway.com/guides/volumes) en `/data/uploads` y define `UPLOAD_DIR=/data/uploads`. Ver `documentation/DEPLOYMENT_CLIENT_RAILWAY.md` → *Paso 5*.
+
 ### 3. Crear / sincronizar base de datos
 
 **Opción recomendada (local):** reconstruye la BD desde `database/schema.sql`, aplica el schema actual de todos los módulos e instala triggers de auditoría.

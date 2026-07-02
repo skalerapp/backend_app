@@ -2,6 +2,7 @@ const db = require('../../config/database');
 const { withDbConnection } = db;
 const path = require('path');
 const { sendControllerError } = require('../../utils/httpError');
+const { toPublicUploadPath } = require('../../utils/uploadPaths');
 
 const ensureEvidenceShape = async (connection) => {
   await connection.execute(`
@@ -59,13 +60,13 @@ const uploadEvidence = async (req, res) => {
     const normalizedActivityId = normalizeActivityId(activity_id);
     const normalizedProjectId = normalizeProjectId(project_id);
 
-    const relativePath = path.relative(path.join(__dirname, '../../'), req.file.path).replace(/\\/g, '/');
+    const publicPath = toPublicUploadPath(req.file.path);
 
     const evidenceId = await withDbConnection(async (connection) => {
       await ensureEvidenceShape(connection);
       const [result] = await connection.execute(
         'INSERT INTO evidence (activity_id, project_id, module_type, file_path, file_name, file_size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
-        [normalizedActivityId, normalizedProjectId, module_type || 'general', relativePath, req.file.originalname, req.file.size, uploadedBy]
+        [normalizedActivityId, normalizedProjectId, module_type || 'general', publicPath, req.file.originalname, req.file.size, uploadedBy]
       );
       return result.insertId;
     });
@@ -75,7 +76,7 @@ const uploadEvidence = async (req, res) => {
       message: 'Evidencia subida correctamente',
       evidenceId,
       file: {
-        path: relativePath,
+        path: publicPath,
         name: req.file.originalname,
         size: req.file.size
       }
