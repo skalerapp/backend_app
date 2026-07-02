@@ -1,8 +1,9 @@
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { UPLOAD_ROOT, ensureUploadRoot } = require('../utils/uploadPaths');
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads');
+ensureUploadRoot();
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -10,7 +11,7 @@ const storage = multer.diskStorage({
     const now = new Date();
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
-    const dest = path.join(UPLOAD_DIR, moduleType, String(year), String(month));
+    const dest = path.join(UPLOAD_ROOT, moduleType, String(year), String(month));
 
     fs.mkdirSync(dest, { recursive: true });
     cb(null, dest);
