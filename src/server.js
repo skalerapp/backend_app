@@ -153,11 +153,31 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 
+const runAttendanceIdentityBackfill = () => {
+  const { withDbConnection } = require('./config/database');
+  const {
+    ensureAttendanceShape,
+    backfillAttendanceIdentity,
+  } = require('./modules/attendance/attendance.controller');
+
+  withDbConnection(async (connection) => {
+    await ensureAttendanceShape(connection);
+    const result = await backfillAttendanceIdentity(connection);
+    const total = (result.employeeIdsFilled ?? 0) + (result.userIdsFilled ?? 0);
+    if (total > 0) {
+      console.log(`✅ Asistencia: ${result.employeeIdsFilled} employee_id y ${result.userIdsFilled} user_id normalizados`);
+    }
+  }).catch((error) => {
+    console.warn('⚠️ No se pudo normalizar identidad de asistencia al iniciar:', error.message);
+  });
+};
+
 // Solo iniciar el listener si no estamos en entorno de test.
 if (process.env.NODE_ENV !== 'test') {
   const server = app.listen(PORT, () => {
     console.log(`🚀 Servidor SKALER ejecutándose en puerto ${PORT}`);
     console.log(`📍 Ambiente: ${process.env.NODE_ENV}`);
+    runAttendanceIdentityBackfill();
   });
 
   server.on('error', (error) => {

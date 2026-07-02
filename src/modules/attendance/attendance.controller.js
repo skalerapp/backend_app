@@ -99,6 +99,60 @@ const normalizeTimeCategory = (value) => {
   return 'productive';
 };
 
+const resolveAttendanceIdentity = async (connection, { employeeId, userId }) => {
+  let resolvedEmployeeId = employeeId ? Number(employeeId) : null;
+  let resolvedUserId = userId ? Number(userId) : null;
+
+  if (resolvedEmployeeId && !resolvedUserId) {
+    const [rows] = await connection.execute(
+      'SELECT user_id FROM employees WHERE id = ? LIMIT 1',
+      [resolvedEmployeeId]
+    );
+    if (rows.length && rows[0].user_id) {
+      resolvedUserId = Number(rows[0].user_id);
+    }
+  }
+
+  if (resolvedUserId && !resolvedEmployeeId) {
+    const [rows] = await connection.execute(
+      'SELECT id FROM employees WHERE user_id = ? LIMIT 1',
+      [resolvedUserId]
+    );
+    if (rows.length) {
+      resolvedEmployeeId = Number(rows[0].id);
+    }
+  }
+
+  return {
+    employeeId: Number.isInteger(resolvedEmployeeId) && resolvedEmployeeId > 0 ? resolvedEmployeeId : null,
+    userId: Number.isInteger(resolvedUserId) && resolvedUserId > 0 ? resolvedUserId : null,
+  };
+};
+
+const backfillAttendanceIdentity = async (connection) => {
+  const [employeeFromUserResult] = await connection.execute(
+    `UPDATE attendance a
+     INNER JOIN employees e ON e.user_id = a.user_id
+     SET a.employee_id = e.id
+     WHERE a.employee_id IS NULL
+       AND a.user_id IS NOT NULL`
+  );
+
+  const [userFromEmployeeResult] = await connection.execute(
+    `UPDATE attendance a
+     INNER JOIN employees e ON e.id = a.employee_id
+     SET a.user_id = e.user_id
+     WHERE a.user_id IS NULL
+       AND a.employee_id IS NOT NULL
+       AND e.user_id IS NOT NULL`
+  );
+
+  return {
+    employeeIdsFilled: employeeFromUserResult.affectedRows ?? 0,
+    userIdsFilled: userFromEmployeeResult.affectedRows ?? 0,
+  };
+};
+
 const ATTENDANCE_SELECT_FIELDS = `
   SELECT
     a.id,
@@ -191,7 +245,7 @@ const buildAttendanceFilters = ({
   const normalizedRole = normalizeRole(req.user?.role);
 
   if (employeeId) {
-    conditions.push('a.employee_id = ?');
+    conditions.push('COALESCE(a.employee_id, e_by_user.id) = ?');
     params.push(employeeId);
   }
 
@@ -503,15 +557,38 @@ const checkInAttendance = async (req, res) => {
         }
       }
 
-      const duplicateQuery = usesUserAttendanceOnly
+      const initialUserId = usesUserAttendanceOnly ? req.user.id : null;
+      const initialEmployeeId = employee_id ? Number(employee_id) : null;
+      const identity = await resolveAttendanceIdentity(connection, {
+        employeeId: initialEmployeeId,
+        userId: initialUserId,
+      });
+
+      const duplicateQuery = identity.employeeId
         ? {
-            sql: `SELECT id, check_out FROM attendance WHERE user_id = ? AND attendance_date = ? LIMIT 1`,
-            params: [req.user.id, today],
+            sql: `SELECT a.id, a.check_out
+                  FROM attendance a
+                  LEFT JOIN employees e_by_user ON a.user_id IS NOT NULL AND e_by_user.user_id = a.user_id
+                  WHERE a.attendance_date = ?
+                    AND COALESCE(a.employee_id, e_by_user.id) = ?
+                  LIMIT 1`,
+            params: [today, identity.employeeId],
           }
-        : {
-            sql: `SELECT id, check_out FROM attendance WHERE employee_id = ? AND attendance_date = ? LIMIT 1`,
-            params: [employee_id, today],
-          };
+        : identity.userId
+          ? {
+              sql: `SELECT a.id, a.check_out
+                    FROM attendance a
+                    LEFT JOIN employees e ON e.user_id = ?
+                    WHERE a.attendance_date = ?
+                      AND (a.user_id = ? OR a.employee_id = e.id)
+                    LIMIT 1`,
+              params: [identity.userId, today, identity.userId],
+            }
+          : null;
+
+      if (!duplicateQuery) {
+        throw new HttpError(400, 'No se pudo resolver la identidad del colaborador para registrar asistencia');
+      }
 
       const [existingRows] = await connection.execute(duplicateQuery.sql, duplicateQuery.params);
 
@@ -526,8 +603,8 @@ const checkInAttendance = async (req, res) => {
           photo_path, attendance_date, created_at
         ) VALUES (?, ?, ?, NOW(), ?, ?, ?, ?, NOW())`,
         [
-          employee_id || null,
-          usesUserAttendanceOnly ? req.user.id : null,
+          identity.employeeId,
+          identity.userId,
           project_id || null,
           location_latitude || null,
           location_longitude || null,
@@ -560,9 +637,10 @@ const checkOutAttendance = async (req, res) => {
       const normalizedRole = normalizeRole(req.user?.role);
 
       const [rows] = await connection.execute(
-        `SELECT a.*, e.user_id AS employee_user_id
+        `SELECT a.*, COALESCE(e.user_id, e_by_user.user_id) AS employee_user_id
          FROM attendance a
          LEFT JOIN employees e ON e.id = a.employee_id
+         LEFT JOIN employees e_by_user ON a.user_id IS NOT NULL AND e_by_user.user_id = a.user_id
          WHERE a.id = ?`,
         [id]
       );
@@ -765,5 +843,7 @@ module.exports = {
   checkOutAttendance,
   getProductivitySummary,
   ensureAttendanceShape,
+  backfillAttendanceIdentity,
+  resolveAttendanceIdentity,
   canExportHrAttendanceReport,
 };

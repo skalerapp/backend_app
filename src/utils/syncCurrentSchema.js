@@ -89,6 +89,10 @@ const ensureCurrentSchema = async ({ connection: providedConnection, installAudi
     await runStep('Creando alcances operativos', async () => ensureOperationalScopeShape(connection));
     await runStep('Normalizando actividades', async () => ensureActivitiesSchema(connection));
     await runStep('Normalizando asistencia', async () => ensureAttendanceShape(connection));
+    await runStep('Completando employee_id/user_id en asistencia', async () => {
+      const { backfillAttendanceIdentity } = require('../modules/attendance/attendance.controller');
+      await backfillAttendanceIdentity(connection);
+    });
     await runStep('Normalizando permisos laborales', async () => ensureLaborPermissionsTable(connection));
     await runStep('Normalizando evidencias', async () => ensureEvidenceShape(connection));
     await runStep('Creando viaticos', async () => ensureAllowancesShape(connection));

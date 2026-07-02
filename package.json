@@ -17,6 +17,7 @@
       "verify:audit:triggers": "node src/utils/verifyAuditTriggers.js",
     "migrate:attendance:drop-status": "node src/utils/dropAttendanceStatusColumn.js",
     "migrate:activities:backfill-legacy": "node src/utils/backfillActivitiesLegacy.js",
+    "migrate:attendance:identity": "node src/utils/backfillAttendanceIdentity.js",
     "migrate:users:roles:v1": "node src/utils/migrateUserRolesV1.js",
     "migrate:users:super-admin": "node src/utils/migrateSuperAdminUser.js",
     "assign:users:role": "node src/utils/assignRoleToUsersByEmail.js",
