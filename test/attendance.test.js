@@ -143,6 +143,31 @@ describe('Attendance endpoints', () => {
     expect(res.body.meta.to).toBe(testAttendanceDate);
   });
 
+  it('GET /api/audit-logs returns attendance traceability after check-in', async () => {
+    if (!attendanceId) return;
+
+    const res = await request(app)
+      .get('/api/audit-logs')
+      .set('Authorization', `Bearer ${authToken}`)
+      .query({
+        entity_type: 'attendance',
+        entity_id: attendanceId,
+        limit: 25,
+        page: 1,
+      });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Array.isArray(res.body.data)).toBe(true);
+    expect(res.body.data.length).toBeGreaterThanOrEqual(1);
+
+    const entry = res.body.data.find((item) => item.action === 'INSERT');
+    expect(entry).toBeDefined();
+    expect(entry.entity_type).toBe('attendance');
+    expect(entry.entity_id).toBe(attendanceId);
+    expect(entry.new_values).toBeTruthy();
+  });
+
   afterAll(async () => {
     await closeDatabase();
   });

@@ -12,6 +12,10 @@ const parseJsonField = (value) => {
     return null;
   }
 
+  if (Buffer.isBuffer(value)) {
+    value = value.toString('utf8');
+  }
+
   if (typeof value === 'object') {
     return value;
   }
@@ -125,12 +129,13 @@ const listAuditLogs = async (req, res) => {
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const { rows, total } = await withDbConnection(async (connection) => {
-      const [countRows] = await connection.execute(
+      const [countRows] = await connection.query(
         `SELECT COUNT(*) AS total FROM audit_logs al ${whereClause}`,
         params
       );
 
-      const [result] = await connection.execute(
+      const listParams = [...params, limit, offset];
+      const [result] = await connection.query(
         `SELECT
            al.id,
            al.user_id,
@@ -139,16 +144,17 @@ const listAuditLogs = async (req, res) => {
            al.action,
            al.entity_type,
            al.entity_id,
-           al.old_values,
-           al.new_values,
-           al.changed_fields,
+           CAST(al.old_values AS CHAR) AS old_values,
+           CAST(al.new_values AS CHAR) AS new_values,
+           CAST(al.changed_fields AS CHAR) AS changed_fields,
            al.ip_address,
            al.created_at
          FROM audit_logs al
          LEFT JOIN users u ON u.id = al.user_id
          ${whereClause}
          ORDER BY al.created_at DESC, al.id DESC
-         LIMIT ${limit} OFFSET ${offset}`
+         LIMIT ? OFFSET ?`,
+        listParams
       );
 
       return {
