@@ -125,6 +125,7 @@ LEFT JOIN (
 
 const COMMERCIAL_OPPORTUNITY_SELECT = `SELECT
   co.id,
+  co.client_id,
   co.client_name,
   co.contact_name,
   co.opportunity_name,
@@ -271,6 +272,28 @@ const normalizeClientMatchKey = (value) => (value || '')
   .trim()
   .toLowerCase();
 
+const resolveRegisteredCommercialClient = async (connection, clientId) => {
+  const normalizedClientId = normalizeNumber(clientId);
+  if (!normalizedClientId) {
+    return {
+      error: 'Debes seleccionar un cliente registrado. Crea el cliente antes de guardar la visita.',
+    };
+  }
+
+  const [rows] = await connection.execute(
+    'SELECT id, business_name, contact_name, city FROM commercial_clients WHERE id = ? LIMIT 1',
+    [normalizedClientId],
+  );
+
+  if (!rows.length) {
+    return {
+      error: 'El cliente seleccionado no existe. Regístralo nuevamente en el directorio comercial.',
+    };
+  }
+
+  return { client: rows[0] };
+};
+
 const extractPayloadNumber = (payload, keys = []) => {
   if (!payload || typeof payload !== 'object') return null;
   for (const key of keys) {
@@ -360,6 +383,7 @@ const buildVisitOpportunityDefaults = ({ visit, automation = {}, userId = null }
   );
 
   return {
+    client_id: visit.client_id,
     client_name: visit.client_name,
     contact_name: automation.contact_name == null
       ? (visit.client_contact || null)
@@ -409,7 +433,8 @@ const upsertOpportunityFromVisit = async ({ connection, req, visit }) => {
     const opportunityId = existingRows[0].id;
     await connection.execute(
       `UPDATE commercial_opportunities
-       SET client_name = ?,
+       SET client_id = ?,
+           client_name = ?,
            contact_name = ?,
            opportunity_name = ?,
            stage = ?,
@@ -424,6 +449,7 @@ const upsertOpportunityFromVisit = async ({ connection, req, visit }) => {
            updated_at = NOW()
        WHERE id = ?`,
       [
+        opportunityPayload.client_id,
         opportunityPayload.client_name,
         opportunityPayload.contact_name,
         opportunityPayload.opportunity_name,
@@ -451,6 +477,7 @@ const upsertOpportunityFromVisit = async ({ connection, req, visit }) => {
 
   const [result] = await connection.execute(
     `INSERT INTO commercial_opportunities (
+       client_id,
        client_name,
        contact_name,
        opportunity_name,
@@ -465,8 +492,9 @@ const upsertOpportunityFromVisit = async ({ connection, req, visit }) => {
        source_visit_id,
        owner_user_id,
        created_by
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
+      opportunityPayload.client_id,
       opportunityPayload.client_name,
       opportunityPayload.contact_name,
       opportunityPayload.opportunity_name,
@@ -848,6 +876,7 @@ const ensureCommercialOpportunitiesTable = async (connection) => {
     )
   `);
 
+  await ensureColumn(connection, 'commercial_opportunities', 'client_id', 'INT NULL AFTER id');
   await ensureColumn(connection, 'commercial_opportunities', 'contact_name', 'VARCHAR(160) NULL AFTER client_name');
   await ensureColumn(connection, 'commercial_opportunities', 'opportunity_name', 'VARCHAR(180) NOT NULL DEFAULT "Oportunidad comercial" AFTER contact_name');
   await ensureColumn(connection, 'commercial_opportunities', 'stage', "ENUM('lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost', 'on_hold') NOT NULL DEFAULT 'lead' AFTER opportunity_name");
@@ -2154,9 +2183,6 @@ const createCommercialVisit = async (req, res) => {
       ? 0
       : (['1', 'true', 'yes', 1, true].includes(will_generate_quotation) ? 1 : 0);
 
-    if (!client_name || !client_name.toString().trim()) {
-      return res.status(400).json({ success: false, message: 'El cliente es obligatorio' });
-    }
     if (!normalizedVisitDate) {
       return res.status(400).json({ success: false, message: 'La fecha de visita es obligatoria' });
     }
@@ -2169,6 +2195,18 @@ const createCommercialVisit = async (req, res) => {
 
     connection = await pool.getConnection();
     await ensureCommercialSchema(connection);
+
+    const clientResolution = await resolveRegisteredCommercialClient(connection, normalizedClientId);
+    if (clientResolution.error) {
+      return res.status(400).json({ success: false, message: clientResolution.error });
+    }
+    const registeredClient = clientResolution.client;
+    const resolvedClientName = registeredClient.business_name;
+    const resolvedClientContact = client_contact?.toString().trim()
+      || registeredClient.contact_name
+      || null;
+    const resolvedCity = city?.toString().trim() || registeredClient.city || null;
+
     await applyAuditContext(connection, req);
 
     const [result] = await connection.execute(
@@ -2199,11 +2237,11 @@ const createCommercialVisit = async (req, res) => {
          created_by
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        normalizedClientId,
-        client_name.toString().trim(),
-        client_contact ? client_contact.toString().trim() : null,
+        registeredClient.id,
+        resolvedClientName,
+        resolvedClientContact,
         normalizedVisitDate,
-        city == null ? null : city.toString().trim(),
+        resolvedCity,
         service_scope == null ? null : service_scope.toString().trim(),
         site_conditions == null ? null : site_conditions.toString().trim(),
         access_types == null ? null : access_types.toString().trim(),
@@ -2296,6 +2334,20 @@ const updateCommercialVisit = async (req, res) => {
       return res.status(400).json({ success: false, message: 'La visita debe incluir latitud y longitud' });
     }
 
+    const nextClientId = req.body.client_id == null ? existing.client_id : normalizeNumber(req.body.client_id);
+    const clientResolution = await resolveRegisteredCommercialClient(connection, nextClientId);
+    if (clientResolution.error) {
+      return res.status(400).json({ success: false, message: clientResolution.error });
+    }
+    const registeredClient = clientResolution.client;
+    const resolvedClientName = registeredClient.business_name;
+    const resolvedClientContact = req.body.client_contact == null
+      ? (existing.client_contact || registeredClient.contact_name || null)
+      : (req.body.client_contact?.toString().trim() || registeredClient.contact_name || null);
+    const resolvedCity = req.body.city == null
+      ? (existing.city || registeredClient.city || null)
+      : (req.body.city?.toString().trim() || registeredClient.city || null);
+
     await applyAuditContext(connection, req);
     await connection.execute(
       `UPDATE commercial_visits
@@ -2325,11 +2377,11 @@ const updateCommercialVisit = async (req, res) => {
            updated_at = NOW()
        WHERE id = ?`,
       [
-        req.body.client_id == null ? existing.client_id : normalizeNumber(req.body.client_id),
-        (req.body.client_name ?? existing.client_name).toString().trim(),
-        req.body.client_contact == null ? existing.client_contact : (req.body.client_contact?.toString().trim() || null),
+        registeredClient.id,
+        resolvedClientName,
+        resolvedClientContact,
         nextVisitDate,
-        req.body.city == null ? existing.city : (req.body.city?.toString().trim() || null),
+        resolvedCity,
         req.body.service_scope == null ? existing.service_scope : (req.body.service_scope?.toString().trim() || null),
         req.body.site_conditions == null ? existing.site_conditions : (req.body.site_conditions?.toString().trim() || null),
         req.body.access_types == null ? existing.access_types : (req.body.access_types?.toString().trim() || null),
@@ -2673,6 +2725,7 @@ const createCommercialOpportunity = async (req, res) => {
   let connection;
   try {
     const {
+      client_id,
       client_name,
       contact_name,
       opportunity_name,
@@ -2696,10 +2749,8 @@ const createCommercialOpportunity = async (req, res) => {
     const normalizedProjectId = normalizeNumber(project_id);
     const normalizedSourceVisitId = normalizeNumber(source_visit_id);
     const normalizedOwnerUserId = normalizeNumber(owner_user_id) ?? req.user?.id ?? null;
+    let normalizedClientId = normalizeNumber(client_id);
 
-    if (!client_name || !client_name.toString().trim()) {
-      return res.status(400).json({ success: false, message: 'El cliente es obligatorio para la oportunidad' });
-    }
     if (!opportunity_name || !opportunity_name.toString().trim()) {
       return res.status(400).json({ success: false, message: 'El nombre de la oportunidad es obligatorio' });
     }
@@ -2715,15 +2766,32 @@ const createCommercialOpportunity = async (req, res) => {
     await ensureCommercialOpportunitiesTable(connection);
 
     if (normalizedSourceVisitId !== null) {
-      const [visitRows] = await connection.execute('SELECT id FROM commercial_visits WHERE id = ? LIMIT 1', [normalizedSourceVisitId]);
+      const [visitRows] = await connection.execute(
+        'SELECT id, client_id FROM commercial_visits WHERE id = ? LIMIT 1',
+        [normalizedSourceVisitId],
+      );
       if (visitRows.length === 0) {
         return res.status(400).json({ success: false, message: 'La visita comercial vinculada no existe' });
       }
+      if (!normalizedClientId) {
+        normalizedClientId = normalizeNumber(visitRows[0].client_id);
+      }
     }
+
+    const clientResolution = await resolveRegisteredCommercialClient(connection, normalizedClientId);
+    if (clientResolution.error) {
+      return res.status(400).json({ success: false, message: clientResolution.error });
+    }
+    const registeredClient = clientResolution.client;
+    const resolvedClientName = registeredClient.business_name;
+    const resolvedContactName = contact_name?.toString().trim()
+      || registeredClient.contact_name
+      || null;
 
     await applyAuditContext(connection, req);
     const [result] = await connection.execute(
       `INSERT INTO commercial_opportunities (
+         client_id,
          client_name,
          contact_name,
          opportunity_name,
@@ -2738,10 +2806,11 @@ const createCommercialOpportunity = async (req, res) => {
          source_visit_id,
          owner_user_id,
          created_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        client_name.toString().trim(),
-        contact_name ? contact_name.toString().trim() : null,
+        registeredClient.id,
+        resolvedClientName,
+        resolvedContactName,
         opportunity_name.toString().trim(),
         normalizedStage,
         normalizedEstimatedValue,
@@ -2802,12 +2871,31 @@ const updateCommercialOpportunity = async (req, res) => {
     if (nextProbability === null) {
       return res.status(400).json({ success: false, message: 'La probabilidad debe estar entre 0 y 100' });
     }
-    if (!(req.body.client_name ?? existing.client_name)?.toString().trim()) {
-      return res.status(400).json({ success: false, message: 'El cliente es obligatorio para la oportunidad' });
-    }
     if (!(req.body.opportunity_name ?? existing.opportunity_name)?.toString().trim()) {
       return res.status(400).json({ success: false, message: 'El nombre de la oportunidad es obligatorio' });
     }
+
+    const nextClientId = req.body.client_id == null ? existing.client_id : normalizeNumber(req.body.client_id);
+    let resolvedClientId = nextClientId;
+    if (!resolvedClientId && nextSourceVisitId !== null) {
+      const [visitRows] = await connection.execute(
+        'SELECT client_id FROM commercial_visits WHERE id = ? LIMIT 1',
+        [nextSourceVisitId],
+      );
+      if (visitRows.length > 0) {
+        resolvedClientId = normalizeNumber(visitRows[0].client_id);
+      }
+    }
+
+    const clientResolution = await resolveRegisteredCommercialClient(connection, resolvedClientId);
+    if (clientResolution.error) {
+      return res.status(400).json({ success: false, message: clientResolution.error });
+    }
+    const registeredClient = clientResolution.client;
+    const resolvedClientName = registeredClient.business_name;
+    const resolvedContactName = req.body.contact_name == null
+      ? (existing.contact_name || registeredClient.contact_name || null)
+      : (req.body.contact_name?.toString().trim() || registeredClient.contact_name || null);
 
     if (nextSourceVisitId !== null) {
       const [visitRows] = await connection.execute('SELECT id FROM commercial_visits WHERE id = ? LIMIT 1', [nextSourceVisitId]);
@@ -2819,7 +2907,8 @@ const updateCommercialOpportunity = async (req, res) => {
     await applyAuditContext(connection, req);
     await connection.execute(
       `UPDATE commercial_opportunities
-       SET client_name = ?,
+       SET client_id = ?,
+           client_name = ?,
            contact_name = ?,
            opportunity_name = ?,
            stage = ?,
@@ -2835,8 +2924,9 @@ const updateCommercialOpportunity = async (req, res) => {
            updated_at = NOW()
        WHERE id = ?`,
       [
-        (req.body.client_name ?? existing.client_name).toString().trim(),
-        req.body.contact_name == null ? existing.contact_name : (req.body.contact_name?.toString().trim() || null),
+        registeredClient.id,
+        resolvedClientName,
+        resolvedContactName,
         (req.body.opportunity_name ?? existing.opportunity_name).toString().trim(),
         nextStage,
         nextEstimatedValue,

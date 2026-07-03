@@ -32,11 +32,32 @@ describe('Commercial endpoints', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('POST /api/commercial/clients creates a registered commercial client', async () => {
+    const res = await request(app)
+      .post('/api/commercial/clients')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        client_type: 'juridica',
+        nit: `900${Date.now()}`.slice(0, 12),
+        business_name: 'Cliente Norte S.A.S.',
+        city: 'Bogotá',
+        contact_name: 'Laura Gómez',
+        billing_email: 'laura@clientenorte.com',
+        areas: ['compras'],
+      });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.business_name).toBe('Cliente Norte S.A.S.');
+    global.__commercialTestClientId = res.body.data.id;
+  });
+
   it('POST /api/commercial/visits creates a georeferenced commercial visit', async () => {
     const res = await request(app)
       .post('/api/commercial/visits')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
+        client_id: global.__commercialTestClientId,
         client_name: 'Cliente Norte S.A.S.',
         client_contact: 'Laura Gómez',
         visit_date: '2026-04-10',
@@ -67,11 +88,28 @@ describe('Commercial endpoints', () => {
     visitId = res.body.data.id;
   });
 
+  it('POST /api/commercial/visits rejects visits without a registered client', async () => {
+    const res = await request(app)
+      .post('/api/commercial/visits')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        client_name: 'Cliente sin registrar',
+        visit_date: '2026-04-11',
+        latitude: 4.711,
+        longitude: -74.0721,
+        status: 'planned',
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/cliente registrado/i);
+  });
+
   it('POST /api/commercial/opportunities creates a pipeline opportunity linked to a visit', async () => {
     const res = await request(app)
       .post('/api/commercial/opportunities')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
+        client_id: global.__commercialTestClientId,
         client_name: 'Cliente Norte S.A.S.',
         contact_name: 'Laura Gómez',
         opportunity_name: 'Propuesta expansión zona norte',
@@ -92,6 +130,20 @@ describe('Commercial endpoints', () => {
     expect(Number(res.body.data.estimated_value)).toBe(42000000);
     expect(res.body.data.source_visit_id).toBe(visitId);
     opportunityId = res.body.data.id;
+  });
+
+  it('POST /api/commercial/opportunities rejects opportunities without a registered client', async () => {
+    const res = await request(app)
+      .post('/api/commercial/opportunities')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        client_name: 'Cliente sin registrar',
+        opportunity_name: 'Oportunidad inválida',
+        stage: 'lead',
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/cliente registrado/i);
   });
 
   it('GET /api/commercial/opportunities returns pipeline records', async () => {
