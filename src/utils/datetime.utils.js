@@ -35,10 +35,13 @@ const toSqlDatetime = (date = new Date()) => {
   return `${pick('year')}-${pick('month')}-${pick('day')} ${hour}:${pick('minute')}:${pick('second')}`;
 };
 
+const toBusinessDateKey = (date = new Date()) => toSqlDatetime(date).slice(0, 10);
+
 module.exports = {
   DEFAULT_APP_TIMEZONE,
   DEFAULT_APP_TIMEZONE_OFFSET,
   resolveAppTimezone,
   resolveAppTimezoneOffset,
   toSqlDatetime,
+  toBusinessDateKey,
 };

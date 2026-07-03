@@ -1,5 +1,6 @@
 const {
   toSqlDatetime,
+  toBusinessDateKey,
   resolveAppTimezoneOffset,
 } = require('../src/utils/datetime.utils');
 
@@ -26,6 +27,14 @@ describe('datetime utils', () => {
     const utcInstant = new Date('2026-06-20T00:32:50.000Z');
 
     expect(toSqlDatetime(utcInstant)).toBe('2026-06-19 19:32:50');
+  });
+
+  it('derives business date keys from timezone-aware SQL datetimes', () => {
+    process.env.APP_TIMEZONE = 'America/Bogota';
+    const utcInstant = new Date('2026-07-03T00:39:42.000Z');
+
+    expect(toSqlDatetime(utcInstant)).toBe('2026-07-02 19:39:42');
+    expect(toBusinessDateKey(utcInstant)).toBe('2026-07-02');
   });
 
   it('defaults app timezone offset to Colombia', () => {

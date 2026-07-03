@@ -7,6 +7,7 @@ const {
   buildOperationalVisibilityFilter,
   canAccessProjectByOperationalScope,
 } = require('../operationalScopes/operationalScopes.service');
+const { toSqlDatetime, toBusinessDateKey } = require('../../utils/datetime.utils');
 
 const normalizeRole = (roleValue) => {
   const raw = (roleValue || '')
@@ -490,7 +491,8 @@ const checkInAttendance = async (req, res) => {
       attendance_date
     } = req.body;
 
-    const today = attendance_date || new Date().toISOString().slice(0, 10);
+    const today = toBusinessDateKey(new Date());
+    const checkInAt = toSqlDatetime(new Date());
 
     const attendanceId = await withDbConnection(async (connection) => {
       await ensureAttendanceShape(connection);
@@ -601,15 +603,17 @@ const checkInAttendance = async (req, res) => {
         `INSERT INTO attendance (
           employee_id, user_id, project_id, check_in, location_latitude, location_longitude,
           photo_path, attendance_date, created_at
-        ) VALUES (?, ?, ?, NOW(), ?, ?, ?, ?, NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           identity.employeeId,
           identity.userId,
           project_id || null,
+          checkInAt,
           location_latitude || null,
           location_longitude || null,
           photo_path || null,
-          today
+          today,
+          checkInAt,
         ]
       );
 
@@ -692,23 +696,26 @@ const checkOutAttendance = async (req, res) => {
       const normalizedReason = normalizedCategory === 'unproductive'
         ? (unproductive_reason || existing.unproductive_reason || null)
         : null;
+      const checkOutAt = toSqlDatetime(new Date());
       await connection.execute(
         `UPDATE attendance
-         SET check_out = NOW(),
+         SET check_out = ?,
              checkout_location_latitude = ?,
              checkout_location_longitude = ?,
              checkout_photo_path = ?,
              time_category = ?,
              unproductive_reason = ?,
-             updated_at = NOW()
+             updated_at = ?
          WHERE id = ?`,
         [
+          checkOutAt,
           location_latitude ?? existing.checkout_location_latitude,
           location_longitude ?? existing.checkout_location_longitude,
           photo_path ?? existing.checkout_photo_path,
           normalizedCategory,
           normalizedReason,
-          id
+          checkOutAt,
+          id,
         ]
       );
     });
