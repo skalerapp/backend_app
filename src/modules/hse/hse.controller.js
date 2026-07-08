@@ -14,12 +14,20 @@ const normalizeDateValue = (value) => {
 };
 
 const tableHasColumn = async (connection, tableName, columnName) => {
-  const [rows] = await connection.execute(`SHOW COLUMNS FROM ${tableName} LIKE ?`, [columnName]);
+  const [rows] = await connection.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = ?
+       AND column_name = ?
+     LIMIT 1`,
+    [tableName, columnName]
+  );
   return rows.length > 0;
 };
 
 const tableExists = async (connection, tableName) => {
-  const [rows] = await connection.execute(
+  const [rows] = await connection.query(
     `SELECT 1
      FROM information_schema.tables
      WHERE table_schema = DATABASE() AND table_name = ?
@@ -30,71 +38,85 @@ const tableExists = async (connection, tableName) => {
 };
 
 const ensureColumn = async (connection, tableName, columnName, definition) => {
-  if (!(await tableExists(connection, tableName))) return;
-  if (!(await tableHasColumn(connection, tableName, columnName))) {
-    await connection.execute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  if (!(await tableExists(connection, tableName))) return false;
+  if (await tableHasColumn(connection, tableName, columnName)) return false;
+  await connection.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${definition}`);
+  return true;
+};
+
+const ensureEppDeliveryShape = async (connection) => {
+  await ensureColumn(connection, 'hse_epp_deliveries', 'epp_item_code', 'VARCHAR(80) NULL');
+  await ensureColumn(connection, 'hse_epp_deliveries', 'delivery_batch_id', 'VARCHAR(36) NULL');
+  if (await tableHasColumn(connection, 'hse_epp_deliveries', 'delivery_batch_id')) {
+    try {
+      await connection.query('CREATE INDEX idx_epp_delivery_batch ON hse_epp_deliveries (delivery_batch_id)');
+    } catch (_) {}
   }
 };
 
 const ensureHseLegacyMigrations = async (connection) => {
+  if (await tableExists(connection, 'hse_trainings')) {
+    try {
+      if (await tableHasColumn(connection, 'hse_trainings', 'trainer_name')) {
+        await ensureColumn(connection, 'hse_trainings', 'instructor_name', 'VARCHAR(120) NULL');
+        await connection.query(
+          `UPDATE hse_trainings
+           SET instructor_name = trainer_name
+           WHERE instructor_name IS NULL AND trainer_name IS NOT NULL`
+        );
+      }
+
+      await ensureColumn(connection, 'hse_trainings', 'title', 'VARCHAR(200) NULL');
+      if (await tableHasColumn(connection, 'hse_trainings', 'title')) {
+        await connection.query(
+          `UPDATE hse_trainings
+           SET title = COALESCE(NULLIF(title, ''), training_type, CONCAT('Capacitación #', id))
+           WHERE title IS NULL OR title = ''`
+        );
+      }
+      await ensureColumn(connection, 'hse_trainings', 'project_id', 'INT NULL');
+      await ensureColumn(connection, 'hse_trainings', 'evidence_path', 'VARCHAR(500) NULL');
+      await ensureColumn(connection, 'hse_trainings', 'notes', 'TEXT NULL');
+      await ensureColumn(connection, 'hse_trainings', 'created_by', 'INT NULL');
+      await ensureColumn(connection, 'hse_trainings', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+      try {
+        await connection.query('ALTER TABLE hse_trainings MODIFY COLUMN employee_id INT NULL');
+      } catch (_) {}
+      try {
+        await connection.query("ALTER TABLE hse_trainings MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'completed'");
+      } catch (_) {}
+    } catch (error) {
+      console.warn('HSE trainings migration warning:', error.message);
+    }
+  }
+
   try {
-    if (!(await tableExists(connection, 'hse_trainings'))) {
-      return;
-    }
+    await ensureEppDeliveryShape(connection);
+  } catch (error) {
+    console.warn('HSE EPP migration warning:', error.message);
+  }
 
-    if (await tableHasColumn(connection, 'hse_trainings', 'trainer_name')) {
-      await ensureColumn(connection, 'hse_trainings', 'instructor_name', 'VARCHAR(120) NULL');
-      await connection.execute(
-        `UPDATE hse_trainings
-         SET instructor_name = trainer_name
-         WHERE instructor_name IS NULL AND trainer_name IS NOT NULL`
-      );
-    }
-
-    await ensureColumn(connection, 'hse_trainings', 'title', 'VARCHAR(200) NULL');
-    if (await tableHasColumn(connection, 'hse_trainings', 'title')) {
-      await connection.execute(
-        `UPDATE hse_trainings
-         SET title = COALESCE(NULLIF(title, ''), training_type, CONCAT('Capacitación #', id))
-         WHERE title IS NULL OR title = ''`
-      );
-    }
-    await ensureColumn(connection, 'hse_trainings', 'project_id', 'INT NULL');
-    await ensureColumn(connection, 'hse_trainings', 'evidence_path', 'VARCHAR(500) NULL');
-    await ensureColumn(connection, 'hse_trainings', 'notes', 'TEXT NULL');
-    await ensureColumn(connection, 'hse_trainings', 'created_by', 'INT NULL');
-    await ensureColumn(connection, 'hse_trainings', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+  if (await tableExists(connection, 'hse_incidents')) {
     try {
-      await connection.execute('ALTER TABLE hse_trainings MODIFY COLUMN employee_id INT NULL');
-    } catch (_) {}
-    try {
-      await connection.execute("ALTER TABLE hse_trainings MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'completed'");
-    } catch (_) {}
-
-    if (await tableExists(connection, 'hse_incidents')) {
       await ensureColumn(connection, 'hse_incidents', 'evidence_path', 'VARCHAR(500) NULL');
       await ensureColumn(connection, 'hse_incidents', 'created_by', 'INT NULL');
       await ensureColumn(connection, 'hse_incidents', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
       try {
-        await connection.execute("ALTER TABLE hse_incidents MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'open'");
+        await connection.query("ALTER TABLE hse_incidents MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'open'");
       } catch (_) {}
+    } catch (error) {
+      console.warn('HSE incidents migration warning:', error.message);
     }
+  }
 
-    if (await tableExists(connection, 'hse_epp_deliveries')) {
-      await ensureColumn(connection, 'hse_epp_deliveries', 'epp_item_code', 'VARCHAR(80) NULL AFTER epp_item');
-      await ensureColumn(connection, 'hse_epp_deliveries', 'delivery_batch_id', 'VARCHAR(36) NULL AFTER epp_item_code');
-      try {
-        await connection.execute('CREATE INDEX idx_epp_delivery_batch ON hse_epp_deliveries (delivery_batch_id)');
-      } catch (_) {}
-    }
+  if (!(await tableExists(connection, 'hse_corrective_actions'))) {
+    return;
+  }
 
-    if (!(await tableExists(connection, 'hse_corrective_actions'))) {
-      return;
-    }
-
+  try {
     if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
       await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
-      await connection.execute(
+      await connection.query(
         `UPDATE hse_corrective_actions
          SET description = action_description
          WHERE (description IS NULL OR description = '') AND action_description IS NOT NULL`
@@ -103,7 +125,7 @@ const ensureHseLegacyMigrations = async (connection) => {
 
     if (await tableHasColumn(connection, 'hse_corrective_actions', 'assigned_to')) {
       await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
-      await connection.execute(
+      await connection.query(
         `UPDATE hse_corrective_actions
          SET responsible_user_id = assigned_to
          WHERE responsible_user_id IS NULL AND assigned_to IS NOT NULL`
@@ -113,13 +135,13 @@ const ensureHseLegacyMigrations = async (connection) => {
     if (await tableHasColumn(connection, 'hse_corrective_actions', 'incident_id')) {
       await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
       await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
-      await connection.execute(
+      await connection.query(
         `UPDATE hse_corrective_actions
          SET source_type = 'incident', source_id = incident_id
          WHERE source_id IS NULL AND incident_id IS NOT NULL`
       );
       try {
-        await connection.execute('ALTER TABLE hse_corrective_actions MODIFY COLUMN incident_id INT NULL');
+        await connection.query('ALTER TABLE hse_corrective_actions MODIFY COLUMN incident_id INT NULL');
       } catch (_) {}
     }
 
@@ -133,10 +155,10 @@ const ensureHseLegacyMigrations = async (connection) => {
     await ensureColumn(connection, 'hse_corrective_actions', 'created_by', 'INT NULL');
     await ensureColumn(connection, 'hse_corrective_actions', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
     try {
-      await connection.execute("ALTER TABLE hse_corrective_actions MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending'");
+      await connection.query("ALTER TABLE hse_corrective_actions MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending'");
     } catch (_) {}
   } catch (error) {
-    console.warn('HSE legacy migration warning:', error.message);
+    console.warn('HSE corrective actions migration warning:', error.message);
   }
 };
 
