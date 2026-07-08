@@ -55,7 +55,13 @@ const ensureEppDeliveryShape = async (connection) => {
 };
 
 const ensureHseEvidenceColumns = async (connection) => {
-  const tables = ['hse_trainings', 'hse_epp_deliveries', 'hse_incidents', 'hse_unsafe_reports'];
+  const tables = [
+    'hse_trainings',
+    'hse_epp_deliveries',
+    'hse_incidents',
+    'hse_unsafe_reports',
+    'hse_corrective_actions',
+  ];
   for (const tableName of tables) {
     if (await tableExists(connection, tableName)) {
       await ensureColumn(connection, tableName, 'evidence_path', 'VARCHAR(500) NULL');
@@ -113,6 +119,7 @@ const ensureCorrectiveActionShape = async (connection) => {
     await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
     await ensureColumn(connection, 'hse_corrective_actions', 'completed_at', 'DATETIME NULL');
     await ensureColumn(connection, 'hse_corrective_actions', 'notes', 'TEXT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'evidence_path', 'VARCHAR(500) NULL');
     await ensureColumn(connection, 'hse_corrective_actions', 'created_by', 'INT NULL');
     await ensureColumn(connection, 'hse_corrective_actions', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
     try {
@@ -147,6 +154,11 @@ const insertCorrectiveActionRow = async (connection, req, payload) => {
     payload.notes || null,
     req.user?.id || null,
   ];
+
+  if (await tableHasColumn(connection, 'hse_corrective_actions', 'evidence_path')) {
+    columns.splice(columns.length - 1, 0, 'evidence_path');
+    values.splice(values.length - 1, 0, payload.evidence_path || null);
+  }
 
   if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
     columns.push('action_description');
@@ -331,6 +343,7 @@ const ensureHseSchema = async (connection) => {
       status VARCHAR(30) NOT NULL DEFAULT 'pending',
       completed_at DATETIME NULL,
       notes TEXT NULL,
+      evidence_path VARCHAR(500) NULL,
       created_by INT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -738,6 +751,7 @@ const createCorrectiveAction = async (req, res) => {
       due_date,
       status,
       notes,
+      evidence_path,
     } = req.body;
 
     if (!description) {
@@ -756,6 +770,7 @@ const createCorrectiveAction = async (req, res) => {
         due_date,
         status,
         notes,
+        evidence_path,
       });
       const [rows] = await connection.execute('SELECT * FROM hse_corrective_actions WHERE id = ?', [insertId]);
       return rows[0];
