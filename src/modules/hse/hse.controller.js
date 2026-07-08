@@ -2,6 +2,7 @@ const db = require('../../config/database');
 const { withDbConnection } = db;
 const { applyAuditContext } = require('../../utils/auditContext');
 const { HttpError, sendControllerError } = require('../../utils/httpError');
+const crypto = require('crypto');
 
 const normalizeDateValue = (value) => {
   if (value === null || value === undefined) return null;
@@ -17,90 +18,126 @@ const tableHasColumn = async (connection, tableName, columnName) => {
   return rows.length > 0;
 };
 
+const tableExists = async (connection, tableName) => {
+  const [rows] = await connection.execute(
+    `SELECT 1
+     FROM information_schema.tables
+     WHERE table_schema = DATABASE() AND table_name = ?
+     LIMIT 1`,
+    [tableName]
+  );
+  return rows.length > 0;
+};
+
 const ensureColumn = async (connection, tableName, columnName, definition) => {
+  if (!(await tableExists(connection, tableName))) return;
   if (!(await tableHasColumn(connection, tableName, columnName))) {
     await connection.execute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
   }
 };
 
 const ensureHseLegacyMigrations = async (connection) => {
-  if (await tableHasColumn(connection, 'hse_trainings', 'trainer_name')) {
-    await ensureColumn(connection, 'hse_trainings', 'instructor_name', 'VARCHAR(120) NULL');
-    await connection.execute(
-      `UPDATE hse_trainings
-       SET instructor_name = trainer_name
-       WHERE instructor_name IS NULL AND trainer_name IS NOT NULL`
-    );
-  }
-
-  await ensureColumn(connection, 'hse_trainings', 'title', 'VARCHAR(200) NULL');
-  await connection.execute(
-    `UPDATE hse_trainings
-     SET title = COALESCE(NULLIF(title, ''), training_type, CONCAT('Capacitación #', id))
-     WHERE title IS NULL OR title = ''`
-  );
-  await ensureColumn(connection, 'hse_trainings', 'project_id', 'INT NULL');
-  await ensureColumn(connection, 'hse_trainings', 'evidence_path', 'VARCHAR(500) NULL');
-  await ensureColumn(connection, 'hse_trainings', 'notes', 'TEXT NULL');
-  await ensureColumn(connection, 'hse_trainings', 'created_by', 'INT NULL');
-  await ensureColumn(connection, 'hse_trainings', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
   try {
-    await connection.execute('ALTER TABLE hse_trainings MODIFY COLUMN employee_id INT NULL');
-  } catch (_) {}
-  try {
-    await connection.execute("ALTER TABLE hse_trainings MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'completed'");
-  } catch (_) {}
+    if (!(await tableExists(connection, 'hse_trainings'))) {
+      return;
+    }
 
-  await ensureColumn(connection, 'hse_incidents', 'evidence_path', 'VARCHAR(500) NULL');
-  await ensureColumn(connection, 'hse_incidents', 'created_by', 'INT NULL');
-  await ensureColumn(connection, 'hse_incidents', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
-  try {
-    await connection.execute("ALTER TABLE hse_incidents MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'open'");
-  } catch (_) {}
+    if (await tableHasColumn(connection, 'hse_trainings', 'trainer_name')) {
+      await ensureColumn(connection, 'hse_trainings', 'instructor_name', 'VARCHAR(120) NULL');
+      await connection.execute(
+        `UPDATE hse_trainings
+         SET instructor_name = trainer_name
+         WHERE instructor_name IS NULL AND trainer_name IS NOT NULL`
+      );
+    }
 
-  if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
-    await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
-    await connection.execute(
-      `UPDATE hse_corrective_actions
-       SET description = action_description
-       WHERE (description IS NULL OR description = '') AND action_description IS NOT NULL`
-    );
-  }
+    await ensureColumn(connection, 'hse_trainings', 'title', 'VARCHAR(200) NULL');
+    if (await tableHasColumn(connection, 'hse_trainings', 'title')) {
+      await connection.execute(
+        `UPDATE hse_trainings
+         SET title = COALESCE(NULLIF(title, ''), training_type, CONCAT('Capacitación #', id))
+         WHERE title IS NULL OR title = ''`
+      );
+    }
+    await ensureColumn(connection, 'hse_trainings', 'project_id', 'INT NULL');
+    await ensureColumn(connection, 'hse_trainings', 'evidence_path', 'VARCHAR(500) NULL');
+    await ensureColumn(connection, 'hse_trainings', 'notes', 'TEXT NULL');
+    await ensureColumn(connection, 'hse_trainings', 'created_by', 'INT NULL');
+    await ensureColumn(connection, 'hse_trainings', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+    try {
+      await connection.execute('ALTER TABLE hse_trainings MODIFY COLUMN employee_id INT NULL');
+    } catch (_) {}
+    try {
+      await connection.execute("ALTER TABLE hse_trainings MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'completed'");
+    } catch (_) {}
 
-  if (await tableHasColumn(connection, 'hse_corrective_actions', 'assigned_to')) {
-    await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
-    await connection.execute(
-      `UPDATE hse_corrective_actions
-       SET responsible_user_id = assigned_to
-       WHERE responsible_user_id IS NULL AND assigned_to IS NOT NULL`
-    );
-  }
+    if (await tableExists(connection, 'hse_incidents')) {
+      await ensureColumn(connection, 'hse_incidents', 'evidence_path', 'VARCHAR(500) NULL');
+      await ensureColumn(connection, 'hse_incidents', 'created_by', 'INT NULL');
+      await ensureColumn(connection, 'hse_incidents', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+      try {
+        await connection.execute("ALTER TABLE hse_incidents MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'open'");
+      } catch (_) {}
+    }
 
-  if (await tableHasColumn(connection, 'hse_corrective_actions', 'incident_id')) {
+    if (await tableExists(connection, 'hse_epp_deliveries')) {
+      await ensureColumn(connection, 'hse_epp_deliveries', 'epp_item_code', 'VARCHAR(80) NULL AFTER epp_item');
+      await ensureColumn(connection, 'hse_epp_deliveries', 'delivery_batch_id', 'VARCHAR(36) NULL AFTER epp_item_code');
+      try {
+        await connection.execute('CREATE INDEX idx_epp_delivery_batch ON hse_epp_deliveries (delivery_batch_id)');
+      } catch (_) {}
+    }
+
+    if (!(await tableExists(connection, 'hse_corrective_actions'))) {
+      return;
+    }
+
+    if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
+      await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
+      await connection.execute(
+        `UPDATE hse_corrective_actions
+         SET description = action_description
+         WHERE (description IS NULL OR description = '') AND action_description IS NOT NULL`
+      );
+    }
+
+    if (await tableHasColumn(connection, 'hse_corrective_actions', 'assigned_to')) {
+      await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
+      await connection.execute(
+        `UPDATE hse_corrective_actions
+         SET responsible_user_id = assigned_to
+         WHERE responsible_user_id IS NULL AND assigned_to IS NOT NULL`
+      );
+    }
+
+    if (await tableHasColumn(connection, 'hse_corrective_actions', 'incident_id')) {
+      await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
+      await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
+      await connection.execute(
+        `UPDATE hse_corrective_actions
+         SET source_type = 'incident', source_id = incident_id
+         WHERE source_id IS NULL AND incident_id IS NOT NULL`
+      );
+      try {
+        await connection.execute('ALTER TABLE hse_corrective_actions MODIFY COLUMN incident_id INT NULL');
+      } catch (_) {}
+    }
+
+    await ensureColumn(connection, 'hse_corrective_actions', 'project_id', 'INT NULL');
     await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
     await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
-    await connection.execute(
-      `UPDATE hse_corrective_actions
-       SET source_type = 'incident', source_id = incident_id
-       WHERE source_id IS NULL AND incident_id IS NOT NULL`
-    );
+    await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'completed_at', 'DATETIME NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'notes', 'TEXT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'created_by', 'INT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
     try {
-      await connection.execute('ALTER TABLE hse_corrective_actions MODIFY COLUMN incident_id INT NULL');
+      await connection.execute("ALTER TABLE hse_corrective_actions MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending'");
     } catch (_) {}
+  } catch (error) {
+    console.warn('HSE legacy migration warning:', error.message);
   }
-
-  await ensureColumn(connection, 'hse_corrective_actions', 'project_id', 'INT NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'completed_at', 'DATETIME NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'notes', 'TEXT NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'created_by', 'INT NULL');
-  await ensureColumn(connection, 'hse_corrective_actions', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
-  try {
-    await connection.execute("ALTER TABLE hse_corrective_actions MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending'");
-  } catch (_) {}
 };
 
 const ensureHseSchema = async (connection) => {
@@ -131,6 +168,8 @@ const ensureHseSchema = async (connection) => {
       project_id INT NULL,
       employee_id INT NULL,
       epp_item VARCHAR(200) NOT NULL,
+      epp_item_code VARCHAR(80) NULL,
+      delivery_batch_id VARCHAR(36) NULL,
       quantity DECIMAL(10,2) NOT NULL DEFAULT 1,
       delivery_date DATE NOT NULL,
       evidence_path VARCHAR(500) NULL,
@@ -221,7 +260,7 @@ const listTrainings = async (req, res) => {
         params.push(projectId);
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const [result] = await connection.execute(
+      const [result] = await connection.query(
         `SELECT ht.*, p.name AS project_name, ${employeeNameExpression} AS employee_name
          FROM hse_trainings ht
          LEFT JOIN projects p ON p.id = ht.project_id
@@ -300,7 +339,7 @@ const listEppDeliveries = async (req, res) => {
         params.push(projectId);
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const [result] = await connection.execute(
+      const [result] = await connection.query(
         `SELECT ed.*, p.name AS project_name, ${employeeNameExpression} AS employee_name,
                 du.name AS delivered_by_name
          FROM hse_epp_deliveries ed
@@ -323,7 +362,61 @@ const listEppDeliveries = async (req, res) => {
 
 const createEppDelivery = async (req, res) => {
   try {
-    const { project_id, employee_id, epp_item, quantity, delivery_date, evidence_path, notes } = req.body;
+    const { project_id, employee_id, epp_item, epp_item_code, quantity, delivery_date, evidence_path, notes, items } = req.body;
+
+    if (Array.isArray(items) && items.length > 0) {
+      const rows = await withDbConnection(async (connection) => {
+        await ensureHseSchema(connection);
+        await applyAuditContext(connection, req);
+
+        if (!delivery_date) {
+          throw new HttpError(400, 'delivery_date es requerido');
+        }
+
+        const batchId = crypto.randomUUID();
+        const createdRows = [];
+
+        for (const item of items) {
+          const eppItem = (item?.epp_item || '').toString().trim();
+          if (!eppItem) {
+            throw new HttpError(400, 'Cada elemento EPP debe tener epp_item');
+          }
+
+          const [result] = await connection.execute(
+            `INSERT INTO hse_epp_deliveries
+             (project_id, employee_id, epp_item, epp_item_code, delivery_batch_id, quantity, delivery_date, evidence_path, notes, delivered_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              project_id || null,
+              employee_id || null,
+              eppItem,
+              item?.epp_item_code ? item.epp_item_code.toString().trim() : null,
+              batchId,
+              Number(item?.quantity) > 0 ? Number(item.quantity) : 1,
+              normalizeDateValue(delivery_date),
+              evidence_path || null,
+              notes || null,
+              req.user?.id || null,
+            ]
+          );
+
+          const [insertedRows] = await connection.execute('SELECT * FROM hse_epp_deliveries WHERE id = ?', [result.insertId]);
+          if (insertedRows[0]) {
+            createdRows.push(insertedRows[0]);
+          }
+        }
+
+        return { batchId, rows: createdRows };
+      });
+
+      return res.status(201).json({
+        success: true,
+        data: rows.rows,
+        delivery_batch_id: rows.batchId,
+        message: `Entrega de EPP registrada (${rows.rows.length} elemento${rows.rows.length === 1 ? '' : 's'})`,
+      });
+    }
+
     if (!epp_item || !delivery_date) {
       throw new HttpError(400, 'epp_item y delivery_date son requeridos');
     }
@@ -333,12 +426,14 @@ const createEppDelivery = async (req, res) => {
       await applyAuditContext(connection, req);
       const [result] = await connection.execute(
         `INSERT INTO hse_epp_deliveries
-         (project_id, employee_id, epp_item, quantity, delivery_date, evidence_path, notes, delivered_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (project_id, employee_id, epp_item, epp_item_code, delivery_batch_id, quantity, delivery_date, evidence_path, notes, delivered_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           project_id || null,
           employee_id || null,
           epp_item.toString().trim(),
+          epp_item_code ? epp_item_code.toString().trim() : null,
+          null,
           Number(quantity) > 0 ? Number(quantity) : 1,
           normalizeDateValue(delivery_date),
           evidence_path || null,
@@ -368,7 +463,7 @@ const listIncidents = async (req, res) => {
         params.push(projectId);
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const [result] = await connection.execute(
+      const [result] = await connection.query(
         `SELECT hi.*, p.name AS project_name, ${employeeNameExpression} AS employee_name
          FROM hse_incidents hi
          LEFT JOIN projects p ON p.id = hi.project_id
@@ -445,7 +540,7 @@ const listUnsafeReports = async (req, res) => {
         params.push(projectId);
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const [result] = await connection.execute(
+      const [result] = await connection.query(
         `SELECT ur.*, p.name AS project_name
          FROM hse_unsafe_reports ur
          LEFT JOIN projects p ON p.id = ur.project_id
