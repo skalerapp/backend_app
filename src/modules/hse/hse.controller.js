@@ -54,6 +54,15 @@ const ensureEppDeliveryShape = async (connection) => {
   }
 };
 
+const ensureHseEvidenceColumns = async (connection) => {
+  const tables = ['hse_trainings', 'hse_epp_deliveries', 'hse_incidents', 'hse_unsafe_reports'];
+  for (const tableName of tables) {
+    if (await tableExists(connection, tableName)) {
+      await ensureColumn(connection, tableName, 'evidence_path', 'VARCHAR(500) NULL');
+    }
+  }
+};
+
 const ensureCorrectiveActionShape = async (connection) => {
   if (!(await tableExists(connection, 'hse_corrective_actions'))) {
     return;
@@ -200,6 +209,12 @@ const ensureHseLegacyMigrations = async (connection) => {
     await ensureEppDeliveryShape(connection);
   } catch (error) {
     console.warn('HSE EPP migration warning:', error.message);
+  }
+
+  try {
+    await ensureHseEvidenceColumns(connection);
+  } catch (error) {
+    console.warn('HSE evidence migration warning:', error.message);
   }
 
   if (await tableExists(connection, 'hse_incidents')) {
