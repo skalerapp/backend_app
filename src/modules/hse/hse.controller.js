@@ -12,6 +12,97 @@ const normalizeDateValue = (value) => {
   return text || null;
 };
 
+const tableHasColumn = async (connection, tableName, columnName) => {
+  const [rows] = await connection.execute(`SHOW COLUMNS FROM ${tableName} LIKE ?`, [columnName]);
+  return rows.length > 0;
+};
+
+const ensureColumn = async (connection, tableName, columnName, definition) => {
+  if (!(await tableHasColumn(connection, tableName, columnName))) {
+    await connection.execute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+};
+
+const ensureHseLegacyMigrations = async (connection) => {
+  if (await tableHasColumn(connection, 'hse_trainings', 'trainer_name')) {
+    await ensureColumn(connection, 'hse_trainings', 'instructor_name', 'VARCHAR(120) NULL');
+    await connection.execute(
+      `UPDATE hse_trainings
+       SET instructor_name = trainer_name
+       WHERE instructor_name IS NULL AND trainer_name IS NOT NULL`
+    );
+  }
+
+  await ensureColumn(connection, 'hse_trainings', 'title', 'VARCHAR(200) NULL');
+  await connection.execute(
+    `UPDATE hse_trainings
+     SET title = COALESCE(NULLIF(title, ''), training_type, CONCAT('Capacitación #', id))
+     WHERE title IS NULL OR title = ''`
+  );
+  await ensureColumn(connection, 'hse_trainings', 'project_id', 'INT NULL');
+  await ensureColumn(connection, 'hse_trainings', 'evidence_path', 'VARCHAR(500) NULL');
+  await ensureColumn(connection, 'hse_trainings', 'notes', 'TEXT NULL');
+  await ensureColumn(connection, 'hse_trainings', 'created_by', 'INT NULL');
+  await ensureColumn(connection, 'hse_trainings', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+  try {
+    await connection.execute('ALTER TABLE hse_trainings MODIFY COLUMN employee_id INT NULL');
+  } catch (_) {}
+  try {
+    await connection.execute("ALTER TABLE hse_trainings MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'completed'");
+  } catch (_) {}
+
+  await ensureColumn(connection, 'hse_incidents', 'evidence_path', 'VARCHAR(500) NULL');
+  await ensureColumn(connection, 'hse_incidents', 'created_by', 'INT NULL');
+  await ensureColumn(connection, 'hse_incidents', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+  try {
+    await connection.execute("ALTER TABLE hse_incidents MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'open'");
+  } catch (_) {}
+
+  if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
+    await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
+    await connection.execute(
+      `UPDATE hse_corrective_actions
+       SET description = action_description
+       WHERE (description IS NULL OR description = '') AND action_description IS NOT NULL`
+    );
+  }
+
+  if (await tableHasColumn(connection, 'hse_corrective_actions', 'assigned_to')) {
+    await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
+    await connection.execute(
+      `UPDATE hse_corrective_actions
+       SET responsible_user_id = assigned_to
+       WHERE responsible_user_id IS NULL AND assigned_to IS NOT NULL`
+    );
+  }
+
+  if (await tableHasColumn(connection, 'hse_corrective_actions', 'incident_id')) {
+    await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
+    await connection.execute(
+      `UPDATE hse_corrective_actions
+       SET source_type = 'incident', source_id = incident_id
+       WHERE source_id IS NULL AND incident_id IS NOT NULL`
+    );
+    try {
+      await connection.execute('ALTER TABLE hse_corrective_actions MODIFY COLUMN incident_id INT NULL');
+    } catch (_) {}
+  }
+
+  await ensureColumn(connection, 'hse_corrective_actions', 'project_id', 'INT NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'completed_at', 'DATETIME NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'notes', 'TEXT NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'created_by', 'INT NULL');
+  await ensureColumn(connection, 'hse_corrective_actions', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+  try {
+    await connection.execute("ALTER TABLE hse_corrective_actions MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending'");
+  } catch (_) {}
+};
+
 const ensureHseSchema = async (connection) => {
   await connection.execute(`
     CREATE TABLE IF NOT EXISTS hse_trainings (
@@ -112,6 +203,8 @@ const ensureHseSchema = async (connection) => {
       INDEX idx_due_date (due_date)
     )
   `);
+
+  await ensureHseLegacyMigrations(connection);
 };
 
 const employeeNameExpression = `COALESCE(u.name, e.employee_name, CONCAT('Colaborador #', e.id))`;
@@ -416,8 +509,10 @@ const listCorrectiveActions = async (req, res) => {
         params.push(projectId);
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const [result] = await connection.execute(
-        `SELECT ca.*, p.name AS project_name, ru.name AS responsible_user_name
+      const [result] = await connection.query(
+        `SELECT ca.*,
+                p.name AS project_name,
+                ru.name AS responsible_user_name
          FROM hse_corrective_actions ca
          LEFT JOIN projects p ON p.id = ca.project_id
          LEFT JOIN users ru ON ru.id = ca.responsible_user_id
@@ -428,7 +523,13 @@ const listCorrectiveActions = async (req, res) => {
       );
       return result;
     });
-    res.json({ success: true, data: rows });
+    res.json({
+      success: true,
+      data: rows.map((row) => ({
+        ...row,
+        description: row.description || row.action_description || null,
+      })),
+    });
   } catch (error) {
     sendControllerError(res, error, 'Error al listar acciones correctivas HSE');
   }
