@@ -54,6 +54,112 @@ const ensureEppDeliveryShape = async (connection) => {
   }
 };
 
+const ensureCorrectiveActionShape = async (connection) => {
+  if (!(await tableExists(connection, 'hse_corrective_actions'))) {
+    return;
+  }
+
+  try {
+    if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
+      await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
+      await connection.query(
+        `UPDATE hse_corrective_actions
+         SET description = action_description
+         WHERE (description IS NULL OR description = '') AND action_description IS NOT NULL`
+      );
+      try {
+        await connection.query('ALTER TABLE hse_corrective_actions MODIFY COLUMN action_description TEXT NULL');
+      } catch (_) {}
+    }
+
+    if (await tableHasColumn(connection, 'hse_corrective_actions', 'assigned_to')) {
+      await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
+      await connection.query(
+        `UPDATE hse_corrective_actions
+         SET responsible_user_id = assigned_to
+         WHERE responsible_user_id IS NULL AND assigned_to IS NOT NULL`
+      );
+      try {
+        await connection.query('ALTER TABLE hse_corrective_actions MODIFY COLUMN assigned_to INT NULL');
+      } catch (_) {}
+    }
+
+    if (await tableHasColumn(connection, 'hse_corrective_actions', 'incident_id')) {
+      await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
+      await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
+      await connection.query(
+        `UPDATE hse_corrective_actions
+         SET source_type = 'incident', source_id = incident_id
+         WHERE source_id IS NULL AND incident_id IS NOT NULL`
+      );
+      try {
+        await connection.query('ALTER TABLE hse_corrective_actions MODIFY COLUMN incident_id INT NULL');
+      } catch (_) {}
+    }
+
+    await ensureColumn(connection, 'hse_corrective_actions', 'project_id', 'INT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'completed_at', 'DATETIME NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'notes', 'TEXT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'created_by', 'INT NULL');
+    await ensureColumn(connection, 'hse_corrective_actions', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+    try {
+      await connection.query("ALTER TABLE hse_corrective_actions MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending'");
+    } catch (_) {}
+  } catch (error) {
+    console.warn('HSE corrective actions migration warning:', error.message);
+  }
+};
+
+const insertCorrectiveActionRow = async (connection, req, payload) => {
+  const description = payload.description.toString().trim();
+  const columns = [
+    'project_id',
+    'source_type',
+    'source_id',
+    'description',
+    'responsible_user_id',
+    'due_date',
+    'status',
+    'notes',
+    'created_by',
+  ];
+  const values = [
+    payload.project_id || null,
+    payload.source_type || null,
+    payload.source_id || null,
+    description,
+    payload.responsible_user_id || null,
+    normalizeDateValue(payload.due_date),
+    (payload.status || 'pending').toString().trim(),
+    payload.notes || null,
+    req.user?.id || null,
+  ];
+
+  if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
+    columns.push('action_description');
+    values.push(description);
+  }
+  if (await tableHasColumn(connection, 'hse_corrective_actions', 'assigned_to')) {
+    columns.push('assigned_to');
+    values.push(payload.responsible_user_id || null);
+  }
+  if (await tableHasColumn(connection, 'hse_corrective_actions', 'incident_id')) {
+    columns.push('incident_id');
+    values.push(payload.source_type === 'incident' ? payload.source_id || null : null);
+  }
+
+  const placeholders = columns.map(() => '?').join(', ');
+  const [result] = await connection.execute(
+    `INSERT INTO hse_corrective_actions (${columns.join(', ')}) VALUES (${placeholders})`,
+    values
+  );
+  return result.insertId;
+};
+
 const ensureHseLegacyMigrations = async (connection) => {
   if (await tableExists(connection, 'hse_trainings')) {
     try {
@@ -113,53 +219,7 @@ const ensureHseLegacyMigrations = async (connection) => {
     return;
   }
 
-  try {
-    if (await tableHasColumn(connection, 'hse_corrective_actions', 'action_description')) {
-      await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
-      await connection.query(
-        `UPDATE hse_corrective_actions
-         SET description = action_description
-         WHERE (description IS NULL OR description = '') AND action_description IS NOT NULL`
-      );
-    }
-
-    if (await tableHasColumn(connection, 'hse_corrective_actions', 'assigned_to')) {
-      await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
-      await connection.query(
-        `UPDATE hse_corrective_actions
-         SET responsible_user_id = assigned_to
-         WHERE responsible_user_id IS NULL AND assigned_to IS NOT NULL`
-      );
-    }
-
-    if (await tableHasColumn(connection, 'hse_corrective_actions', 'incident_id')) {
-      await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
-      await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
-      await connection.query(
-        `UPDATE hse_corrective_actions
-         SET source_type = 'incident', source_id = incident_id
-         WHERE source_id IS NULL AND incident_id IS NOT NULL`
-      );
-      try {
-        await connection.query('ALTER TABLE hse_corrective_actions MODIFY COLUMN incident_id INT NULL');
-      } catch (_) {}
-    }
-
-    await ensureColumn(connection, 'hse_corrective_actions', 'project_id', 'INT NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'source_type', 'VARCHAR(40) NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'source_id', 'INT NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'description', 'TEXT NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'responsible_user_id', 'INT NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'completed_at', 'DATETIME NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'notes', 'TEXT NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'created_by', 'INT NULL');
-    await ensureColumn(connection, 'hse_corrective_actions', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
-    try {
-      await connection.query("ALTER TABLE hse_corrective_actions MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending'");
-    } catch (_) {}
-  } catch (error) {
-    console.warn('HSE corrective actions migration warning:', error.message);
-  }
+  await ensureCorrectiveActionShape(connection);
 };
 
 const ensureHseSchema = async (connection) => {
@@ -672,23 +732,17 @@ const createCorrectiveAction = async (req, res) => {
     const row = await withDbConnection(async (connection) => {
       await ensureHseSchema(connection);
       await applyAuditContext(connection, req);
-      const [result] = await connection.execute(
-        `INSERT INTO hse_corrective_actions
-         (project_id, source_type, source_id, description, responsible_user_id, due_date, status, notes, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          project_id || null,
-          source_type || null,
-          source_id || null,
-          description.toString().trim(),
-          responsible_user_id || null,
-          normalizeDateValue(due_date),
-          (status || 'pending').toString().trim(),
-          notes || null,
-          req.user?.id || null,
-        ]
-      );
-      const [rows] = await connection.execute('SELECT * FROM hse_corrective_actions WHERE id = ?', [result.insertId]);
+      const insertId = await insertCorrectiveActionRow(connection, req, {
+        project_id,
+        source_type,
+        source_id,
+        description,
+        responsible_user_id,
+        due_date,
+        status,
+        notes,
+      });
+      const [rows] = await connection.execute('SELECT * FROM hse_corrective_actions WHERE id = ?', [insertId]);
       return rows[0];
     });
 
