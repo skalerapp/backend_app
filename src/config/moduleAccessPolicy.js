@@ -81,6 +81,7 @@ const MODULE_ACCESS_POLICY = {
   },
   warehouse_logistics: {
     attendance: ['read', 'create', 'update'],
+    projects: ['read'],
     warehouse: ['read', 'create', 'update'],
   },
   commercial: {

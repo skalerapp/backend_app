@@ -456,6 +456,64 @@ const upsertWarehouseAsset = async (connection, asset) => {
   );
 };
 
+const updateWarehouseAssetById = async (connection, assetId, asset) => {
+  const [result] = await connection.execute(
+    `UPDATE warehouse_assets
+     SET
+       sku_code = ?,
+       asset_name = ?,
+       category_name = ?,
+       unit_measure = ?,
+       brand = ?,
+       serial_number = ?,
+       model = ?,
+       work_order = ?,
+       client_name = ?,
+       dispatch_note = ?,
+       asset_status = ?,
+       lifecycle_status = ?,
+       current_city = ?,
+       minimum_stock = ?,
+       current_stock = ?,
+       vehicle_plate = ?,
+       vehicle_type = ?,
+       insurance_due_date = ?,
+       soat_due_date = ?,
+       technical_due_date = ?,
+       technical_detail = ?,
+       notes = ?,
+       updated_at = NOW()
+     WHERE id = ?`,
+    [
+      asset.skuCode,
+      asset.assetName,
+      asset.categoryName,
+      asset.unitMeasure,
+      asset.brand,
+      asset.serialNumber,
+      asset.model,
+      asset.workOrder,
+      asset.clientName,
+      asset.dispatchNote,
+      asset.assetStatus,
+      asset.lifecycleStatus,
+      asset.currentCity,
+      asset.minimumStock,
+      asset.currentStock,
+      asset.vehiclePlate,
+      asset.vehicleType,
+      asset.insuranceDueDate,
+      asset.soatDueDate,
+      asset.technicalDueDate,
+      asset.technicalDetail,
+      asset.notes,
+      assetId,
+    ]
+  );
+
+  return result.affectedRows > 0;
+};
+
 module.exports = {
   ensureWarehouseShape,
   generateNextAssetCode,
@@ -467,4 +525,5 @@ module.exports = {
   normalizeWarehouseAssetPayload,
   shouldImportWarehouseAsset,
   upsertWarehouseAsset,
+  updateWarehouseAssetById,
 };

@@ -12,6 +12,7 @@ const {
   normalizeWarehouseAssetPayload,
   shouldImportWarehouseAsset,
   upsertWarehouseAsset,
+  updateWarehouseAssetById,
 } = require('./warehouse.service');
 
 const listAssets = async (req, res) => {
@@ -188,6 +189,72 @@ const createAsset = async (req, res) => {
     });
   } catch (error) {
     sendControllerError(res, error, 'Error al registrar activo de almacén');
+  }
+};
+
+const updateAsset = async (req, res) => {
+  try {
+    const assetId = Number(req.params.id);
+    if (!Number.isFinite(assetId) || assetId <= 0) {
+      return res.status(400).json({ success: false, message: 'ID de activo invalido' });
+    }
+
+    const payload = req.body || {};
+    const normalized = normalizeWarehouseAssetPayload(payload);
+
+    if (!normalized.assetName) {
+      return res.status(400).json({ success: false, message: 'asset_name es requerido para actualizar el activo' });
+    }
+
+    if (isFleetAssetLike(normalized)) {
+      if (!normalized.vehiclePlate) {
+        return res.status(400).json({ success: false, message: 'vehicle_plate es requerido para activos de flota' });
+      }
+      if (!normalized.vehicleType) {
+        return res.status(400).json({ success: false, message: 'vehicle_type es requerido para activos de flota' });
+      }
+
+      const fleetAlerts = buildFleetDocumentAlerts(normalized);
+      const missing = fleetAlerts.filter((item) => item.missing);
+      if (missing.length) {
+        return res.status(400).json({
+          success: false,
+          message: `Debes registrar vencimiento de ${missing.map((item) => item.label).join(', ')} para activos de flota`,
+        });
+      }
+    }
+
+    const assetRow = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+
+      const [existingRows] = await connection.execute(
+        'SELECT id FROM warehouse_assets WHERE id = ? LIMIT 1',
+        [assetId]
+      );
+      if (!existingRows.length) {
+        throw new HttpError(404, 'Activo de almacen no encontrado');
+      }
+
+      await applyAuditContext(connection, req);
+      const updated = await updateWarehouseAssetById(connection, assetId, normalized);
+      if (!updated) {
+        throw new HttpError(404, 'Activo de almacen no encontrado');
+      }
+
+      const [rows] = await connection.execute(
+        'SELECT * FROM warehouse_assets WHERE id = ? LIMIT 1',
+        [assetId]
+      );
+      return rows[0];
+    });
+
+    res.json({
+      success: true,
+      message: 'Activo de almacen actualizado',
+      data: assetRow,
+    });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al actualizar activo de almacen');
   }
 };
 
@@ -413,6 +480,7 @@ const createMovement = async (req, res) => {
 module.exports = {
   listAssets,
   createAsset,
+  updateAsset,
   importAssets,
   listMovements,
   createMovement,
