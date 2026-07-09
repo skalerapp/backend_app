@@ -297,14 +297,23 @@ const buildAttendanceFilters = ({
 
 const canExportHrAttendanceReport = (roleValue) => {
   const role = normalizeRole(roleValue);
-  return role === 'super_admin' || role === 'administrative';
+  return role === 'super_admin' || role === 'administrative' || role === 'gerencial';
 };
 
 const canRegisterOthersWithoutProjectAssignment = (roleValue) => {
   const role = normalizeRole(roleValue);
   return role === 'super_admin' ||
     role === 'administrative' ||
-    role === 'coordinator_operations';
+    role === 'coordinator_operations' ||
+    role === 'gerencial';
+};
+
+const canUseAdministrativeUserAttendance = (roleValue) => {
+  const role = normalizeRole(roleValue);
+  return role === 'super_admin' ||
+    role === 'administrative' ||
+    role === 'coordinator_operations' ||
+    role === 'gerencial';
 };
 
 const canManageStaffAttendanceCheckout = (roleValue) => canRegisterOthersWithoutProjectAssignment(roleValue);
@@ -502,8 +511,7 @@ const checkInAttendance = async (req, res) => {
       const usesUserAttendanceOnly = (
         !employee_id &&
         (
-          normalizedRole === 'administrative' ||
-          normalizedRole === 'coordinator_operations' ||
+          canUseAdministrativeUserAttendance(normalizedRole) ||
           normalizedRole === 'leader' ||
           normalizedRole === 'supervisor' ||
           normalizedRole === 'commercial'
@@ -516,7 +524,7 @@ const checkInAttendance = async (req, res) => {
 
       const isAdministrativeUserAttendance =
         usesUserAttendanceOnly &&
-        (normalizedRole === 'administrative' || normalizedRole === 'coordinator_operations');
+        canUseAdministrativeUserAttendance(normalizedRole);
 
       if (isAdministrativeUserAttendance && project_id) {
         throw new HttpError(400, 'La asistencia administrativa no usa proyecto');
@@ -535,7 +543,7 @@ const checkInAttendance = async (req, res) => {
         }
       }
 
-      if (employee_id && project_id) {
+      if (employee_id && project_id && !canRegisterOthersWithoutProjectAssignment(normalizedRole)) {
         const [assignmentRows] = await connection.execute(
           `SELECT 1
            FROM project_collaborators
@@ -669,7 +677,7 @@ const checkOutAttendance = async (req, res) => {
         }
       }
 
-      if ((normalizedRole === 'gerencial' || normalizedRole === 'commercial') && ownerUserId !== Number(req.user.id)) {
+      if (normalizedRole === 'commercial' && ownerUserId !== Number(req.user.id)) {
         throw new HttpError(403, 'Solo puedes cerrar tu propia asistencia');
       }
 

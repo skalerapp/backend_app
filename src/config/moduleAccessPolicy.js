@@ -92,7 +92,8 @@ const MODULE_ACCESS_POLICY = {
   gerencial: {
     dashboard: ['read'],
     projects: ['read'],
-    attendance: ['read'],
+    attendance: ['read', 'create', 'update'],
+    employees: ['read'],
     activities: ['read'],
     allowances: ['read'],
     warehouse: ['read'],
