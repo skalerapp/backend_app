@@ -6,5 +6,6 @@ const { verifyToken, verifyModuleAccess } = require('../../middleware/auth.middl
 router.get('/', verifyToken, verifyModuleAccess('performance', 'read'), controller.listPerformanceEvaluations);
 router.post('/', verifyToken, verifyModuleAccess('performance', 'create'), controller.createPerformanceEvaluation);
 router.put('/:id', verifyToken, verifyModuleAccess('performance', 'update'), controller.updatePerformanceEvaluation);
+router.patch('/:id/status', verifyToken, verifyModuleAccess('performance', 'update'), controller.updatePerformanceEvaluationStatus);
 
 module.exports = router;

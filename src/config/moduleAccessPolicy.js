@@ -60,6 +60,7 @@ const MODULE_ACCESS_POLICY = {
     hse: ['read', 'create', 'update'],
     tasks: ['read', 'create', 'update'],
     performance: ['read', 'create', 'update'],
+    labor_permissions: ['read'],
   },
   leader: {
     projects: ['read'],
@@ -72,6 +73,7 @@ const MODULE_ACCESS_POLICY = {
     hse: ['read', 'create', 'update'],
     tasks: ['read', 'create', 'update'],
     performance: ['read', 'create', 'update'],
+    labor_permissions: ['read'],
   },
   employee: {
     attendance: ['read', 'create', 'update'],
@@ -102,6 +104,7 @@ const MODULE_ACCESS_POLICY = {
     hse: ['read'],
     tasks: ['read'],
     performance: ['read'],
+    labor_permissions: ['read'],
   },
   hse: {
     attendance: ['read', 'create', 'update'],

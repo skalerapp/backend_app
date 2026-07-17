@@ -6,6 +6,7 @@ const { normalizeRole } = require('../../middleware/auth.middleware');
 const {
   ensureOperationalScopeShape,
   canAccessProjectByOperationalScope,
+  buildOperationalVisibilityFilter,
 } = require('../operationalScopes/operationalScopes.service');
 
 const normalizeTaskStatus = (value) => {
@@ -55,6 +56,41 @@ const ensureTasksSchema = async (connection) => {
   `);
 };
 
+const assertTaskAccess = async (connection, req, taskRow) => {
+  const normalizedRole = normalizeRole(req.user?.role);
+
+  if (
+    normalizedRole === 'super_admin' ||
+    normalizedRole === 'administrative' ||
+    normalizedRole === 'coordinator_operations' ||
+    normalizedRole === 'supervisor' ||
+    normalizedRole === 'gerencial'
+  ) {
+    return;
+  }
+
+  if (normalizedRole === 'employee') {
+    const [rows] = await connection.execute(
+      'SELECT id FROM employees WHERE user_id = ? AND id = ? LIMIT 1',
+      [req.user.id, taskRow.employee_id]
+    );
+    if (!rows.length) {
+      throw new HttpError(403, 'No tienes acceso a esta tarea');
+    }
+    return;
+  }
+
+  const hasAccess = await canAccessProjectByOperationalScope({
+    connection,
+    userId: req.user.id,
+    role: normalizedRole,
+    projectId: Number(taskRow.project_id),
+  });
+  if (!hasAccess) {
+    throw new HttpError(403, 'No tienes acceso operativo a esta tarea');
+  }
+};
+
 const listTasks = async (req, res) => {
   try {
     const projectId = req.query.project_id ? Number(req.query.project_id) : null;
@@ -63,8 +99,24 @@ const listTasks = async (req, res) => {
 
     const rows = await withDbConnection(async (connection) => {
       await ensureTasksSchema(connection);
+      await ensureOperationalScopeShape(connection);
+
+      const normalizedRole = normalizeRole(req.user?.role);
       const conditions = [];
       const params = [];
+
+      const visibility = buildOperationalVisibilityFilter({
+        normalizedRole,
+        userId: req.user.id,
+        projectAlias: 'p',
+        employeeUserExpression: 'e.user_id',
+      });
+
+      if (visibility.clause) {
+        conditions.push(visibility.clause);
+        params.push(...visibility.params);
+      }
+
       if (projectId) {
         conditions.push('t.project_id = ?');
         params.push(projectId);
@@ -77,6 +129,7 @@ const listTasks = async (req, res) => {
         conditions.push('t.status = ?');
         params.push(status);
       }
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const [result] = await connection.execute(
         `SELECT t.*, p.name AS project_name, p.ot_code,
@@ -163,11 +216,31 @@ const updateTask = async (req, res) => {
     const { id } = req.params;
     const row = await withDbConnection(async (connection) => {
       await ensureTasksSchema(connection);
+      await ensureOperationalScopeShape(connection);
+
       const [existingRows] = await connection.execute('SELECT * FROM operational_tasks WHERE id = ?', [id]);
       if (!existingRows.length) {
         throw new HttpError(404, 'Tarea no encontrada');
       }
       const existing = existingRows[0];
+
+      await assertTaskAccess(connection, req, existing);
+
+      const normalizedRole = normalizeRole(req.user?.role);
+      if (normalizedRole === 'employee') {
+        const allowedKeys = ['status'];
+        const hasDisallowedChange = Object.keys(req.body || {}).some((key) => {
+          if (allowedKeys.includes(key)) return false;
+          if (key === 'status') return false;
+          const nextValue = req.body[key];
+          if (nextValue == null) return false;
+          return true;
+        });
+        if (hasDisallowedChange) {
+          throw new HttpError(403, 'Solo puedes actualizar el estado de tus tareas asignadas');
+        }
+      }
+
       const nextStatus = req.body.status == null ? existing.status : normalizeTaskStatus(req.body.status);
       let completedAt = existing.completed_at;
       if (nextStatus === 'completed' && !completedAt) {
@@ -208,6 +281,14 @@ const deleteTask = async (req, res) => {
     const { id } = req.params;
     await withDbConnection(async (connection) => {
       await ensureTasksSchema(connection);
+      await ensureOperationalScopeShape(connection);
+
+      const [existingRows] = await connection.execute('SELECT * FROM operational_tasks WHERE id = ?', [id]);
+      if (!existingRows.length) {
+        throw new HttpError(404, 'Tarea no encontrada');
+      }
+
+      await assertTaskAccess(connection, req, existingRows[0]);
       await applyAuditContext(connection, req);
       const [result] = await connection.execute('DELETE FROM operational_tasks WHERE id = ?', [id]);
       if (!result.affectedRows) {
