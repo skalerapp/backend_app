@@ -3,6 +3,7 @@ const { withDbConnection } = db;
 const { applyAuditContext } = require('../../utils/auditContext');
 const { HttpError, sendControllerError } = require('../../utils/httpError');
 const { normalizeRole } = require('../../middleware/auth.middleware');
+const { ensureOperationalScopeShape } = require('../operationalScopes/operationalScopes.service');
 
 const normalizeEmployeeStatus = (statusValue) => (statusValue || '').toString().trim().toLowerCase();
 const normalizePermissionStatus = (value) => {
@@ -32,8 +33,190 @@ const canDecideLaborPermission = (normalizedRole) => {
   return (
     normalizedRole === 'super_admin' ||
     normalizedRole === 'administrative' ||
-    normalizedRole === 'coordinator_operations'
+    normalizedRole === 'coordinator_operations' ||
+    normalizedRole === 'gerencial'
   );
+};
+
+const canRequestLaborPermissionForAnyEmployee = (normalizedRole) => {
+  return canDecideLaborPermission(normalizedRole);
+};
+
+const getOwnEmployeeId = async (connection, userId) => {
+  const [rows] = await connection.execute(
+    'SELECT id FROM employees WHERE user_id = ? LIMIT 1',
+    [userId]
+  );
+
+  return rows[0]?.id ?? null;
+};
+
+const isEmployeeInOperationalScope = async (connection, { userId, normalizedRole, employeeId }) => {
+  await ensureOperationalScopeShape(connection);
+
+  if (normalizedRole === 'leader') {
+    const [rows] = await connection.execute(
+      `SELECT e.id
+       FROM employees e
+       INNER JOIN project_collaborators pc ON pc.employee_id = e.id
+       INNER JOIN projects p ON p.id = pc.project_id
+       WHERE e.id = ?
+         AND (
+           p.manager_id = ?
+           OR EXISTS (
+             SELECT 1
+             FROM operational_role_assignments ora
+             WHERE ora.project_id = p.id
+               AND ora.user_id = ?
+               AND ora.role_scope = 'leader'
+               AND ora.is_active = 1
+           )
+         )
+       LIMIT 1`,
+      [employeeId, userId, userId]
+    );
+
+    return rows.length > 0;
+  }
+
+  if (normalizedRole === 'supervisor') {
+    const [rows] = await connection.execute(
+      `SELECT e.id
+       FROM employees e
+       INNER JOIN project_collaborators pc ON pc.employee_id = e.id
+       INNER JOIN projects p ON p.id = pc.project_id
+       WHERE e.id = ?
+         AND EXISTS (
+           SELECT 1
+           FROM operational_role_assignments ora
+           WHERE ora.project_id = p.id
+             AND ora.user_id = ?
+             AND ora.role_scope = 'supervisor'
+             AND ora.is_active = 1
+         )
+       LIMIT 1`,
+      [employeeId, userId]
+    );
+
+    return rows.length > 0;
+  }
+
+  return false;
+};
+
+const canRequestLaborPermissionForEmployee = async (connection, { userId, normalizedRole, employeeId }) => {
+  const role = normalizeRole(normalizedRole);
+
+  if (canRequestLaborPermissionForAnyEmployee(role)) {
+    return true;
+  }
+
+  const ownEmployeeId = await getOwnEmployeeId(connection, userId);
+  if (ownEmployeeId != null && Number(ownEmployeeId) === Number(employeeId)) {
+    return true;
+  }
+
+  if (role === 'leader' || role === 'supervisor') {
+    return isEmployeeInOperationalScope(connection, { userId, normalizedRole: role, employeeId });
+  }
+
+  return false;
+};
+
+const assertCanRequestLaborPermissionForEmployee = async (connection, req, employeeId) => {
+  const normalizedRole = normalizeRole(req.user?.role);
+  const allowed = await canRequestLaborPermissionForEmployee(connection, {
+    userId: req.user?.id,
+    normalizedRole,
+    employeeId,
+  });
+
+  if (!allowed) {
+    throw new HttpError(403, 'No tienes permiso para solicitar permisos laborales para este colaborador');
+  }
+};
+
+const buildLaborPermissionVisibilityFilter = async (connection, { userId, normalizedRole }) => {
+  const role = normalizeRole(normalizedRole);
+
+  if (canRequestLaborPermissionForAnyEmployee(role)) {
+    return { clause: '', params: [] };
+  }
+
+  if (role === 'leader') {
+    await ensureOperationalScopeShape(connection);
+    return {
+      clause: `(
+        lp.requested_by_user_id = ?
+        OR EXISTS (
+          SELECT 1
+          FROM employees e
+          WHERE e.id = lp.employee_id
+            AND e.user_id = ?
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM employees e
+          INNER JOIN project_collaborators pc ON pc.employee_id = e.id
+          INNER JOIN projects p ON p.id = pc.project_id
+          WHERE e.id = lp.employee_id
+            AND (
+              p.manager_id = ?
+              OR EXISTS (
+                SELECT 1
+                FROM operational_role_assignments ora
+                WHERE ora.project_id = p.id
+                  AND ora.user_id = ?
+                  AND ora.role_scope = 'leader'
+                  AND ora.is_active = 1
+              )
+            )
+        )
+      )`,
+      params: [userId, userId, userId, userId],
+    };
+  }
+
+  if (role === 'supervisor') {
+    await ensureOperationalScopeShape(connection);
+    return {
+      clause: `(
+        lp.requested_by_user_id = ?
+        OR EXISTS (
+          SELECT 1
+          FROM employees e
+          WHERE e.id = lp.employee_id
+            AND e.user_id = ?
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM employees e
+          INNER JOIN project_collaborators pc ON pc.employee_id = e.id
+          INNER JOIN projects p ON p.id = pc.project_id
+          WHERE e.id = lp.employee_id
+            AND EXISTS (
+              SELECT 1
+              FROM operational_role_assignments ora
+              WHERE ora.project_id = p.id
+                AND ora.user_id = ?
+                AND ora.role_scope = 'supervisor'
+                AND ora.is_active = 1
+            )
+        )
+      )`,
+      params: [userId, userId, userId],
+    };
+  }
+
+  return {
+    clause: `EXISTS (
+      SELECT 1
+      FROM employees e
+      WHERE e.id = lp.employee_id
+        AND e.user_id = ?
+    )`,
+    params: [userId],
+  };
 };
 
 const ensureLaborPermissionsTable = async (connection) => {
@@ -105,9 +288,18 @@ const getLaborPermissions = async (req, res) => {
     const rows = await withDbConnection(async (connection) => {
       await ensureLaborPermissionsTable(connection);
 
+      const normalizedRole = normalizeRole(req.user?.role);
+      const visibility = await buildLaborPermissionVisibilityFilter(connection, {
+        userId: req.user?.id,
+        normalizedRole,
+      });
+      const where = visibility.clause ? `WHERE ${visibility.clause}` : '';
+
       const [result] = await connection.execute(
         `${laborPermissionSelect}
-         ORDER BY lp.created_at DESC`
+         ${where}
+         ORDER BY lp.created_at DESC`,
+        visibility.params
       );
 
       return result;
@@ -170,6 +362,8 @@ const createLaborPermission = async (req, res) => {
         throw new HttpError(400, 'Solo se pueden registrar permisos para colaboradores activos');
       }
 
+      await assertCanRequestLaborPermissionForEmployee(connection, req, employee_id);
+
       await applyAuditContext(connection, req);
       const [result] = await connection.execute(
         `INSERT INTO labor_permissions
@@ -214,6 +408,8 @@ const updateLaborPermission = async (req, res) => {
       const existing = existingRows[0];
       const normalizedRole = normalizeRole(req.user?.role);
 
+      await assertCanRequestLaborPermissionForEmployee(connection, req, existing.employee_id);
+
       if (status != null && normalizePermissionStatus(status) !== existing.status) {
         throw new HttpError(400, 'Para aprobar o rechazar usa el endpoint de decisión');
       }
@@ -243,6 +439,8 @@ const updateLaborPermission = async (req, res) => {
         if (employeeStatus !== 'active') {
           throw new HttpError(400, 'Solo se pueden asignar permisos a colaboradores activos');
         }
+
+        await assertCanRequestLaborPermissionForEmployee(connection, req, nextEmployeeId);
       }
 
       const nextStartDate = start_date ?? existing.start_date;
@@ -331,7 +529,7 @@ const deleteLaborPermission = async (req, res) => {
     await withDbConnection(async (connection) => {
       await ensureLaborPermissionsTable(connection);
 
-      const [existingRows] = await connection.execute('SELECT status FROM labor_permissions WHERE id = ?', [id]);
+      const [existingRows] = await connection.execute('SELECT status, employee_id FROM labor_permissions WHERE id = ?', [id]);
       if (!existingRows.length) {
         throw new HttpError(404, 'Permiso laboral no encontrado');
       }
@@ -339,6 +537,8 @@ const deleteLaborPermission = async (req, res) => {
       if (existingRows[0].status === 'approved') {
         throw new HttpError(400, 'No se puede eliminar un permiso aprobado');
       }
+
+      await assertCanRequestLaborPermissionForEmployee(connection, req, existingRows[0].employee_id);
 
       await applyAuditContext(connection, req);
       await connection.execute('DELETE FROM labor_permissions WHERE id = ?', [id]);

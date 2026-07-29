@@ -60,7 +60,7 @@ const MODULE_ACCESS_POLICY = {
     hse: ['read', 'create', 'update'],
     tasks: ['read', 'create', 'update'],
     performance: ['read', 'create', 'update'],
-    labor_permissions: ['read'],
+    labor_permissions: ['read', 'create', 'update', 'delete'],
   },
   leader: {
     projects: ['read'],
@@ -73,24 +73,27 @@ const MODULE_ACCESS_POLICY = {
     hse: ['read', 'create', 'update'],
     tasks: ['read', 'create', 'update'],
     performance: ['read', 'create', 'update'],
-    labor_permissions: ['read'],
+    labor_permissions: ['read', 'create', 'update', 'delete'],
   },
   employee: {
     attendance: ['read', 'create', 'update'],
     activities: ['read'],
     hse: ['read', 'create'],
     tasks: ['read', 'update'],
+    labor_permissions: ['read', 'create', 'update', 'delete'],
   },
   warehouse_logistics: {
     attendance: ['read', 'create', 'update'],
     projects: ['read'],
     warehouse: ['read', 'create', 'update'],
+    labor_permissions: ['read', 'create', 'update', 'delete'],
   },
   commercial: {
     attendance: ['read', 'create', 'update'],
     projects: ['read'],
     allowances: ['read', 'create', 'update'],
     commercial: ['read', 'create', 'update'],
+    labor_permissions: ['read', 'create', 'update', 'delete'],
   },
   gerencial: {
     dashboard: ['read'],
@@ -104,13 +107,14 @@ const MODULE_ACCESS_POLICY = {
     hse: ['read'],
     tasks: ['read'],
     performance: ['read'],
-    labor_permissions: ['read'],
+    labor_permissions: ['read', 'create', 'update'],
   },
   hse: {
     attendance: ['read', 'create', 'update'],
     hse: ['read', 'create', 'update', 'delete'],
     projects: ['read'],
     employees: ['read'],
+    labor_permissions: ['read', 'create', 'update', 'delete'],
   },
 };
 
