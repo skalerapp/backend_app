@@ -2,6 +2,7 @@ const db = require('../../config/database');
 const pool = db.pool;
 const { applyAuditContext } = require('../../utils/auditContext');
 const { hashPassword } = require('../../utils/auth.utils');
+const { revokeAllSessionsForUser } = require('../auth/auth.session.service');
 
 const normalizeRequestedRole = (roleValue) => {
   const raw = (roleValue || '')
@@ -168,8 +169,7 @@ const getUsers = async (req, res) => {
     await ensureUsersRoleSchema();
     connection = await pool.getConnection();
     const [users] = await connection.execute(
-      'SELECT id, email, name, role, status FROM users WHERE status = ? ORDER BY name ASC',
-      ['active']
+      'SELECT id, email, name, role, status FROM users ORDER BY status ASC, name ASC'
     );
 
     res.json({ success: true, data: users.map(toApiUser) });
@@ -387,6 +387,13 @@ const updateUser = async (req, res) => {
           'UPDATE users SET email = ?, name = ?, role = ?, status = ? WHERE id = ?',
           [normalizedEmail, normalizedName, storageRole, normalizedStatus, userId]
         );
+      }
+
+      if (normalizedStatus === 'inactive') {
+        await revokeAllSessionsForUser({
+          userId,
+          reason: 'Usuario desactivado',
+        });
       }
 
       const [rows] = await connection.execute(

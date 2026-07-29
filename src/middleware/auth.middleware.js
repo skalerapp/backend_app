@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { MODULE_ACCESS_POLICY } = require('../config/moduleAccessPolicy');
-const { getSessionState, touchSession } = require('../modules/auth/auth.session.service');
+const { getSessionState, touchSession, getUserById, isUserAccountActive } = require('../modules/auth/auth.session.service');
 
 const normalizeRole = (roleValue) => {
   const raw = (roleValue || '')
@@ -146,6 +146,15 @@ const verifyToken = async (req, res, next) => {
         success: false,
         message: 'La sesión vinculada ya no está activa',
         reason: sessionState.reason,
+      });
+    }
+
+    const userAccount = await getUserById(decoded.id);
+    if (!userAccount || !isUserAccountActive(userAccount.status)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tu usuario está inactivo. Contacta al administrador.',
+        reason: 'user_inactive',
       });
     }
 

@@ -44,7 +44,7 @@ describe('Users endpoints', () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it('GET /api/users returns active users for authenticated requester', async () => {
+  it('GET /api/users returns all users for authenticated requester', async () => {
     const res = await request(app)
       .get('/api/users')
       .set('Authorization', `Bearer ${adminToken}`);
@@ -102,6 +102,29 @@ describe('Users endpoints', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.role).toBe('leader');
     expect(res.body.data.status).toBe('inactive');
+  });
+
+  it('POST /api/auth/login rejects inactive app user', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({
+        email: `app.user.${unique}@skaler.com`,
+        password: 'Pass1234!',
+      });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.reason).toBe('user_inactive');
+  });
+
+  it('GET /api/users includes inactive users', async () => {
+    const res = await request(app)
+      .get('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.statusCode).toBe(200);
+    const inactiveUser = res.body.data.find((user) => user.id === createdUserId);
+    expect(inactiveUser).toBeDefined();
+    expect(inactiveUser.status).toBe('inactive');
   });
 
   it('administrative requester cannot assign super admin role', async () => {

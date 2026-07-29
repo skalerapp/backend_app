@@ -4,6 +4,7 @@ const { hashPassword, comparePassword, generateToken } = require('../../utils/au
 const { validationResult } = require('express-validator');
 const {
   ensureAuthSessionSchema,
+  isUserAccountActive,
   createAppSession,
   createWebLaunchTicket,
   consumeWebLaunchTicket,
@@ -123,6 +124,14 @@ const login = async (req, res) => {
       return res.status(401).json({
         success: false,
         message: 'Credenciales inválidas'
+      });
+    }
+
+    if (!isUserAccountActive(user.status)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tu usuario está inactivo. Contacta al administrador.',
+        reason: 'user_inactive',
       });
     }
 

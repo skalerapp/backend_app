@@ -197,10 +197,66 @@ const getUserById = async (userId) => {
   const connection = await pool.getConnection();
   try {
     const [rows] = await connection.execute(
-      'SELECT id, email, name, role FROM users WHERE id = ? LIMIT 1',
+      'SELECT id, email, name, role, status FROM users WHERE id = ? LIMIT 1',
       [userId],
     );
     return rows[0] || null;
+  } finally {
+    connection.release();
+  }
+};
+
+const isUserAccountActive = (status) => {
+  const normalized = (status || 'active').toString().trim().toLowerCase();
+  return normalized === 'active';
+};
+
+const revokeAllSessionsForUser = async ({ userId, reason }) => {
+  await ensureAuthSessionSchema();
+  const connection = await pool.getConnection();
+  const revokeReason = reason || 'Usuario desactivado';
+  try {
+    const [appSessions] = await connection.execute(
+      'SELECT id FROM auth_app_sessions WHERE user_id = ? AND session_status = ?',
+      [userId, SESSION_STATUS_ACTIVE],
+    );
+
+    for (const row of appSessions) {
+      await connection.execute(
+        `
+          UPDATE auth_web_sessions
+          SET session_status = ?, revoked_at = NOW(), revoked_reason = ?, updated_at = NOW()
+          WHERE app_session_id = ? AND session_status = ?
+        `,
+        [SESSION_STATUS_REVOKED, revokeReason, row.id, SESSION_STATUS_ACTIVE],
+      );
+      await connection.execute(
+        `
+          UPDATE auth_web_launch_tickets
+          SET ticket_status = ?, updated_at = NOW()
+          WHERE app_session_id = ? AND ticket_status IN (?, ?)
+        `,
+        [TICKET_STATUS_REVOKED, row.id, TICKET_STATUS_PENDING, TICKET_STATUS_CONSUMED],
+      );
+    }
+
+    await connection.execute(
+      `
+        UPDATE auth_app_sessions
+        SET session_status = ?, revoked_at = NOW(), revoked_reason = ?, updated_at = NOW()
+        WHERE user_id = ? AND session_status = ?
+      `,
+      [SESSION_STATUS_REVOKED, revokeReason, userId, SESSION_STATUS_ACTIVE],
+    );
+
+    await connection.execute(
+      `
+        UPDATE auth_web_sessions
+        SET session_status = ?, revoked_at = NOW(), revoked_reason = ?, updated_at = NOW()
+        WHERE user_id = ? AND session_status = ?
+      `,
+      [SESSION_STATUS_REVOKED, revokeReason, userId, SESSION_STATUS_ACTIVE],
+    );
   } finally {
     connection.release();
   }
@@ -496,6 +552,9 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
     if (!user) {
       throw new Error('No fue posible recuperar el usuario de la sesión web');
     }
+    if (!isUserAccountActive(user.status)) {
+      throw new Error('El usuario está inactivo');
+    }
 
     return {
       jwtSessionId,
@@ -729,6 +788,9 @@ module.exports = {
   revokeAppSessionByJwtSessionId,
   revokeWebSessionByJwtSessionId,
   revokeLinkedWebSessions,
+  revokeAllSessionsForUser,
+  getUserById,
+  isUserAccountActive,
   touchSession,
   getSessionState,
   getAppSessionBridgeOverview,
