@@ -329,7 +329,7 @@ const parseIsoDate = (value) => {
 
 const getAttendance = async (req, res) => {
   try {
-    const { employee_id, user_id, attendance_date } = req.query;
+    const { employee_id, user_id, attendance_date, date_from, date_to } = req.query;
     const rows = await withDbConnection(async (connection) => {
       await ensureAttendanceShape(connection);
       await ensureOperationalScopeShape(connection);
@@ -339,6 +339,8 @@ const getAttendance = async (req, res) => {
         employeeId: employee_id,
         userId: user_id,
         attendanceDate: attendance_date,
+        dateFrom: parseIsoDate(date_from),
+        dateTo: parseIsoDate(date_to),
       });
 
       const [result] = await connection.execute(
