@@ -42,7 +42,7 @@ const MODULE_ACCESS_POLICY = {
     employees: ['read'],
     labor_permissions: ['read', 'create', 'update'],
     activities: ['read', 'create', 'update', 'delete'],
-    allowances: ['read'],
+    allowances: ['read', 'update'],
     warehouse: ['read', 'create', 'update'],
     commercial: ['read', 'create', 'update'],
     hse: ['read'],
