@@ -31,6 +31,16 @@ describe('Projects endpoints', () => {
     expect(res.body.data.otCode).toMatch(/^OT\d+$/);
   });
 
+  it('GET /api/projects/manager-candidates returns active project leaders', async () => {
+    const res = await request(app)
+      .get('/api/projects/manager-candidates')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Array.isArray(res.body.data)).toBe(true);
+  });
+
   it('POST /api/projects creates a new project', async () => {
     const res = await request(app)
       .post('/api/projects')

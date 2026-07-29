@@ -6,6 +6,7 @@ const { verifyToken, verifyModuleAccess } = require('../../middleware/auth.middl
 // Rutas de proyectos
 router.get('/', verifyToken, verifyModuleAccess('projects', 'read'), projectController.getProjects);
 router.get('/next-ot', verifyToken, verifyModuleAccess('projects', 'create'), projectController.getNextOtCode);
+router.get('/manager-candidates', verifyToken, verifyModuleAccess('projects', 'read'), projectController.getProjectManagerCandidates);
 router.get('/:id', verifyToken, verifyModuleAccess('projects', 'read'), projectController.getProjectById);
 router.get('/:id/consolidated-history', verifyToken, verifyModuleAccess('projects', 'read'), projectController.getProjectConsolidatedHistory);
 router.get('/:id/collaborators', verifyToken, verifyModuleAccess('projects', 'read'), projectController.getProjectCollaborators);

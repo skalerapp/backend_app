@@ -43,6 +43,44 @@ const otCodeFromProjectId = (projectId) => `OT${projectId}`;
 const todayIsoDate = () => new Date().toISOString().slice(0, 10);
 const isFinalStatus = (status) => ['completed', 'closed'].includes(status);
 
+const PROJECT_MANAGER_ROLES = new Set([
+  'super_admin',
+  'administrative',
+  'coordinator_operations',
+  'leader',
+  'supervisor',
+  'gerencial',
+]);
+
+const getProjectManagerCandidates = async (req, res) => {
+  try {
+    const rows = await withDbConnection(async (connection) => {
+      const [users] = await connection.execute(
+        `SELECT id, email, name, role, status
+         FROM users
+         WHERE status = ?
+         ORDER BY name ASC`,
+        ['active'],
+      );
+      return users;
+    });
+
+    const data = rows
+      .map((row) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        role: normalizeRole(row.role),
+        status: row.status,
+      }))
+      .filter((user) => PROJECT_MANAGER_ROLES.has(user.role));
+
+    res.json({ success: true, data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al obtener candidatos a líder de proyecto');
+  }
+};
+
 const ensureProjectCollaboratorsSchema = async (connection) => {
   await connection.execute(`
     CREATE TABLE IF NOT EXISTS project_collaborators (
@@ -778,6 +816,7 @@ module.exports = {
   getProjects,
   getProjectById,
   getProjectConsolidatedHistory,
+  getProjectManagerCandidates,
   createProject,
   updateProject,
   getNextOtCode,
