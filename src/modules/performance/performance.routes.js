@@ -4,6 +4,12 @@ const controller = require('./performance.controller');
 const { verifyToken, verifyModuleAccess } = require('../../middleware/auth.middleware');
 
 router.get('/', verifyToken, verifyModuleAccess('performance', 'read'), controller.listPerformanceEvaluations);
+router.get(
+  '/collaborator-candidates',
+  verifyToken,
+  verifyModuleAccess('performance', 'create'),
+  controller.getPerformanceEvaluationCollaboratorCandidates
+);
 router.post('/', verifyToken, verifyModuleAccess('performance', 'create'), controller.createPerformanceEvaluation);
 router.put('/:id', verifyToken, verifyModuleAccess('performance', 'update'), controller.updatePerformanceEvaluation);
 router.patch('/:id/status', verifyToken, verifyModuleAccess('performance', 'update'), controller.updatePerformanceEvaluationStatus);

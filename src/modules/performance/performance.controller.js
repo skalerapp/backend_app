@@ -3,6 +3,10 @@ const { withDbConnection } = db;
 const { applyAuditContext } = require('../../utils/auditContext');
 const { HttpError, sendControllerError } = require('../../utils/httpError');
 const { normalizeRole } = require('../../middleware/auth.middleware');
+const {
+  canAssignEmployeeInOperationalScope,
+  listOperationalCollaboratorCandidates,
+} = require('../../services/operationalCollaboratorCandidates.service');
 
 const normalizeEvaluationStatus = (value) => {
   const raw = (value || 'draft').toString().trim().toLowerCase();
@@ -171,6 +175,16 @@ const createPerformanceEvaluation = async (req, res) => {
 
     const row = await withDbConnection(async (connection) => {
       await ensurePerformanceEvaluationsSchema(connection);
+
+      const allowed = await canAssignEmployeeInOperationalScope(connection, {
+        userId: req.user?.id,
+        role: req.user?.role,
+        employeeId: employee_id,
+      });
+      if (!allowed) {
+        throw new HttpError(403, 'No tienes permiso para evaluar a este colaborador');
+      }
+
       await applyAuditContext(connection, req);
       const [result] = await connection.execute(
         `INSERT INTO performance_evaluations
@@ -313,9 +327,30 @@ const updatePerformanceEvaluationStatus = async (req, res) => {
   }
 };
 
+const getPerformanceEvaluationCollaboratorCandidates = async (req, res) => {
+  try {
+    const includeEmployeeId = req.query.include_employee_id
+      ? Number(req.query.include_employee_id)
+      : null;
+
+    const rows = await withDbConnection(async (connection) => {
+      return listOperationalCollaboratorCandidates(connection, {
+        userId: req.user?.id,
+        role: req.user?.role,
+        includeEmployeeId,
+      });
+    });
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al obtener colaboradores para evaluación de desempeño');
+  }
+};
+
 module.exports = {
   ensurePerformanceEvaluationsSchema,
   listPerformanceEvaluations,
+  getPerformanceEvaluationCollaboratorCandidates,
   createPerformanceEvaluation,
   updatePerformanceEvaluation,
   updatePerformanceEvaluationStatus,

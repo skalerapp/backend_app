@@ -3,6 +3,10 @@ const { withDbConnection } = db;
 const { applyAuditContext } = require('../../utils/auditContext');
 const { HttpError, sendControllerError } = require('../../utils/httpError');
 const { normalizeRole } = require('../../middleware/auth.middleware');
+const {
+  canAssignEmployeeInOperationalScope,
+  listOperationalCollaboratorCandidates,
+} = require('../../services/operationalCollaboratorCandidates.service');
 const { ensureOperationalScopeShape } = require('../operationalScopes/operationalScopes.service');
 
 const normalizeEmployeeStatus = (statusValue) => (statusValue || '').toString().trim().toLowerCase();
@@ -105,22 +109,11 @@ const isEmployeeInOperationalScope = async (connection, { userId, normalizedRole
 };
 
 const canRequestLaborPermissionForEmployee = async (connection, { userId, normalizedRole, employeeId }) => {
-  const role = normalizeRole(normalizedRole);
-
-  if (canRequestLaborPermissionForAnyEmployee(role)) {
-    return true;
-  }
-
-  const ownEmployeeId = await getOwnEmployeeId(connection, userId);
-  if (ownEmployeeId != null && Number(ownEmployeeId) === Number(employeeId)) {
-    return true;
-  }
-
-  if (role === 'leader' || role === 'supervisor') {
-    return isEmployeeInOperationalScope(connection, { userId, normalizedRole: role, employeeId });
-  }
-
-  return false;
+  return canAssignEmployeeInOperationalScope(connection, {
+    userId,
+    role: normalizedRole,
+    employeeId,
+  });
 };
 
 const assertCanRequestLaborPermissionForEmployee = async (connection, req, employeeId) => {
@@ -550,19 +543,6 @@ const deleteLaborPermission = async (req, res) => {
   }
 };
 
-const laborPermissionEmployeeSelect = `
-  SELECT DISTINCT
-    e.*,
-    e.employee_name AS name,
-    u.name AS app_user_name,
-    u.email AS app_user_email,
-    u.email AS email
-`;
-
-const laborPermissionEmployeeOrder = `
-  ORDER BY COALESCE(e.employee_name, u.name, CONCAT('Colaborador #', e.id))
-`;
-
 const getLaborPermissionCollaboratorCandidates = async (req, res) => {
   try {
     const includeEmployeeId = req.query.include_employee_id
@@ -570,139 +550,11 @@ const getLaborPermissionCollaboratorCandidates = async (req, res) => {
       : null;
 
     const rows = await withDbConnection(async (connection) => {
-      await ensureOperationalScopeShape(connection);
-
-      const normalizedRole = normalizeRole(req.user?.role);
-      const userId = req.user?.id;
-
-      if (canRequestLaborPermissionForAnyEmployee(normalizedRole)) {
-        const params = [];
-        let statusClause = "LOWER(COALESCE(e.status, 'active')) = 'active'";
-        if (includeEmployeeId) {
-          statusClause = `(${statusClause} OR e.id = ?)`;
-          params.push(includeEmployeeId);
-        }
-
-        const [result] = await connection.execute(
-          `${laborPermissionEmployeeSelect}
-           FROM employees e
-           LEFT JOIN users u ON e.user_id = u.id
-           WHERE ${statusClause}
-           ${laborPermissionEmployeeOrder}`,
-          params
-        );
-
-        return result;
-      }
-
-      if (normalizedRole === 'leader') {
-        const params = [userId, userId, userId];
-        let includeClause = '';
-        if (includeEmployeeId) {
-          includeClause = ' OR e.id = ?';
-          params.push(includeEmployeeId);
-        }
-
-        const [result] = await connection.execute(
-          `${laborPermissionEmployeeSelect}
-           FROM employees e
-           LEFT JOIN users u ON e.user_id = u.id
-           LEFT JOIN project_collaborators pc ON pc.employee_id = e.id
-           LEFT JOIN projects p ON p.id = pc.project_id
-           WHERE (
-             (e.user_id = ? AND LOWER(COALESCE(e.status, 'active')) = 'active')
-             OR (
-               LOWER(COALESCE(e.status, 'active')) = 'active'
-               AND pc.id IS NOT NULL
-               AND (
-                 p.manager_id = ?
-                 OR EXISTS (
-                   SELECT 1
-                   FROM operational_role_assignments ora
-                   WHERE ora.project_id = p.id
-                     AND ora.user_id = ?
-                     AND ora.role_scope = 'leader'
-                     AND ora.is_active = 1
-                 )
-               )
-             )
-             ${includeClause}
-           )
-           ${laborPermissionEmployeeOrder}`,
-          params
-        );
-
-        return result;
-      }
-
-      if (normalizedRole === 'supervisor') {
-        const params = [userId, userId];
-        let includeClause = '';
-        if (includeEmployeeId) {
-          includeClause = ' OR e.id = ?';
-          params.push(includeEmployeeId);
-        }
-
-        const [result] = await connection.execute(
-          `${laborPermissionEmployeeSelect}
-           FROM employees e
-           LEFT JOIN users u ON e.user_id = u.id
-           LEFT JOIN project_collaborators pc ON pc.employee_id = e.id
-           LEFT JOIN projects p ON p.id = pc.project_id
-           WHERE (
-             (e.user_id = ? AND LOWER(COALESCE(e.status, 'active')) = 'active')
-             OR (
-               LOWER(COALESCE(e.status, 'active')) = 'active'
-               AND pc.id IS NOT NULL
-               AND EXISTS (
-                 SELECT 1
-                 FROM operational_role_assignments ora
-                 WHERE ora.project_id = p.id
-                   AND ora.user_id = ?
-                   AND ora.role_scope = 'supervisor'
-                   AND ora.is_active = 1
-               )
-             )
-             ${includeClause}
-           )
-           ${laborPermissionEmployeeOrder}`,
-          params
-        );
-
-        return result;
-      }
-
-      const params = [userId];
-      if (includeEmployeeId) {
-        params.push(includeEmployeeId);
-        const [result] = await connection.execute(
-          `${laborPermissionEmployeeSelect}
-           FROM employees e
-           LEFT JOIN users u ON e.user_id = u.id
-           WHERE e.user_id = ? OR e.id = ?
-           ${laborPermissionEmployeeOrder}`,
-          params
-        );
-
-        return result.filter((row) => {
-          if (includeEmployeeId && Number(row.id) === Number(includeEmployeeId)) {
-            return true;
-          }
-          return normalizeEmployeeStatus(row.status) === 'active';
-        });
-      }
-
-      const [result] = await connection.execute(
-        `${laborPermissionEmployeeSelect}
-         FROM employees e
-         LEFT JOIN users u ON e.user_id = u.id
-         WHERE e.user_id = ?
-           AND LOWER(COALESCE(e.status, 'active')) = 'active'
-         LIMIT 1`,
-        params
-      );
-
-      return result;
+      return listOperationalCollaboratorCandidates(connection, {
+        userId: req.user?.id,
+        role: req.user?.role,
+        includeEmployeeId,
+      });
     });
 
     res.json({ success: true, data: rows });
