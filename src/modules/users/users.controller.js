@@ -40,6 +40,12 @@ const normalizeRequestedRole = (roleValue) => {
     case 'empleado':
     case 'colaborador':
       return 'employee';
+    case 'operational_employee':
+    case 'operational':
+    case 'operativo':
+    case 'empleado_operativo':
+    case 'colaborador_operativo':
+      return 'operational_employee';
     case 'almacen':
     case 'bodega':
     case 'warehouse':
@@ -212,6 +218,7 @@ const createUser = async (req, res) => {
       'supervisor',
       'leader',
       'employee',
+      'operational_employee',
       'warehouse_logistics',
       'commercial',
       'hse',
@@ -321,6 +328,7 @@ const updateUser = async (req, res) => {
       'supervisor',
       'leader',
       'employee',
+      'operational_employee',
       'warehouse_logistics',
       'commercial',
       'hse',

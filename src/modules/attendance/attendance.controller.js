@@ -40,6 +40,12 @@ const normalizeRole = (roleValue) => {
     case 'empleado':
     case 'colaborador':
       return 'employee';
+    case 'operational_employee':
+    case 'operational':
+    case 'operativo':
+    case 'empleado_operativo':
+    case 'colaborador_operativo':
+      return 'operational_employee';
     default:
       return raw;
   }
@@ -559,7 +565,7 @@ const checkInAttendance = async (req, res) => {
         }
       }
 
-      if ((normalizedRole === 'employee' || normalizedRole === 'commercial' || normalizedRole === 'warehouse_logistics' || normalizedRole === 'hse') && employee_id) {
+      if ((normalizedRole === 'employee' || normalizedRole === 'operational_employee' || normalizedRole === 'commercial' || normalizedRole === 'warehouse_logistics' || normalizedRole === 'hse') && employee_id) {
         const [ownedEmployee] = await connection.execute(
           'SELECT id FROM employees WHERE id = ? AND user_id = ? LIMIT 1',
           [employee_id, req.user.id]
@@ -665,7 +671,7 @@ const checkOutAttendance = async (req, res) => {
       const existing = rows[0];
       const ownerUserId = Number(existing.user_id || existing.employee_user_id || 0);
 
-      if (normalizedRole === 'employee' || normalizedRole === 'warehouse_logistics' || normalizedRole === 'hse') {
+      if (normalizedRole === 'employee' || normalizedRole === 'operational_employee' || normalizedRole === 'warehouse_logistics' || normalizedRole === 'hse') {
         const [ownedRows] = await connection.execute(
           `SELECT a.id
            FROM attendance a

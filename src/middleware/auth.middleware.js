@@ -38,6 +38,12 @@ const normalizeRole = (roleValue) => {
     case 'empleado':
     case 'colaborador':
       return 'employee';
+    case 'operational_employee':
+    case 'operational':
+    case 'operativo':
+    case 'empleado_operativo':
+    case 'colaborador_operativo':
+      return 'operational_employee';
     case 'almacen':
     case 'bodega':
     case 'warehouse':

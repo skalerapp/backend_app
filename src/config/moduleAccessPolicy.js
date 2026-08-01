@@ -82,6 +82,10 @@ const MODULE_ACCESS_POLICY = {
     tasks: ['read', 'update'],
     labor_permissions: ['read', 'create', 'update', 'delete'],
   },
+  operational_employee: {
+    attendance: ['read', 'create', 'update'],
+    labor_permissions: ['read', 'create', 'update', 'delete'],
+  },
   warehouse_logistics: {
     attendance: ['read', 'create', 'update'],
     projects: ['read'],

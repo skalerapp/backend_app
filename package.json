@@ -1,6 +1,6 @@
 {
   "name": "skaler-backend",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Backend API for SKALER - Sistema Integral de Gestión Operativa Empresarial",
   "main": "src/server.js",
   "scripts": {

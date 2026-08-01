@@ -49,7 +49,7 @@ const buildOperationalVisibilityFilter = ({ normalizedRole, userId, projectAlias
     };
   }
 
-  if (role === 'employee') {
+  if (role === 'employee' || role === 'operational_employee') {
     if (!employeeUserExpression) {
       return { clause: '1 = 0', params: [] };
     }
