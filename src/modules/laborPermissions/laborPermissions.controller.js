@@ -42,6 +42,14 @@ const canDecideLaborPermission = (normalizedRole) => {
   );
 };
 
+const canDeleteDecidedLaborPermission = (normalizedRole) => {
+  return (
+    normalizedRole === 'super_admin' ||
+    normalizedRole === 'administrative' ||
+    normalizedRole === 'gerencial'
+  );
+};
+
 const canRequestLaborPermissionForAnyEmployee = (normalizedRole) => {
   return canDecideLaborPermission(normalizedRole);
 };
@@ -522,13 +530,15 @@ const deleteLaborPermission = async (req, res) => {
     await withDbConnection(async (connection) => {
       await ensureLaborPermissionsTable(connection);
 
+      const normalizedRole = normalizeRole(req.user?.role);
       const [existingRows] = await connection.execute('SELECT status, employee_id FROM labor_permissions WHERE id = ?', [id]);
       if (!existingRows.length) {
         throw new HttpError(404, 'Permiso laboral no encontrado');
       }
 
-      if (existingRows[0].status === 'approved') {
-        throw new HttpError(400, 'No se puede eliminar un permiso aprobado');
+      const status = normalizePermissionStatus(existingRows[0].status);
+      if (!canDeleteDecidedLaborPermission(normalizedRole) && status !== 'pending') {
+        throw new HttpError(400, 'Solo puedes eliminar permisos laborales pendientes de aprobación');
       }
 
       await assertCanRequestLaborPermissionForEmployee(connection, req, existingRows[0].employee_id);
