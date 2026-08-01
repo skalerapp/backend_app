@@ -97,6 +97,44 @@ const getEmployees = async (req, res) => {
   }
 };
 
+const getMyEmployee = async (req, res) => {
+  let connection;
+  try {
+    await ensureEmployeeSchema();
+    connection = await pool.getConnection();
+
+    const [employees] = await connection.execute(
+      `SELECT
+        e.*,
+        e.employee_name AS name,
+        u.name AS app_user_name,
+        u.email AS app_user_email,
+        u.email AS email
+      FROM employees e
+      LEFT JOIN users u ON e.user_id = u.id
+      WHERE e.user_id = ?
+      LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (employees.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No tienes una ficha de colaborador vinculada a tu usuario',
+      });
+    }
+
+    res.json({ success: true, data: employees[0] });
+  } catch (error) {
+    console.error('getMyEmployee error:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener tu ficha de colaborador', error: error.message });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+};
+
 // Obtener empleado por ID
 const getEmployeeById = async (req, res) => {
   const { id } = req.params;
@@ -318,6 +356,7 @@ const getLinkableAppUsers = async (req, res) => {
 
 module.exports = {
   getEmployees,
+  getMyEmployee,
   getEmployeeById,
   getLinkableAppUsers,
   createEmployee,
