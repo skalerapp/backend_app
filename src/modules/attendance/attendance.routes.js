@@ -8,6 +8,7 @@ router.get('/productivity/summary', verifyToken, verifyModuleAccess('attendance'
 router.get('/', verifyToken, verifyModuleAccess('attendance', 'read'), attendanceController.getAttendance);
 router.get('/:id', verifyToken, verifyModuleAccess('attendance', 'read'), attendanceController.getAttendanceById);
 router.post('/check-in', verifyToken, verifyModuleAccess('attendance', 'create'), attendanceController.checkInAttendance);
+router.post('/:id/events', verifyToken, verifyModuleAccess('attendance', 'update'), attendanceController.registerAttendanceEvent);
 router.put('/:id/check-out', verifyToken, verifyModuleAccess('attendance', 'update'), attendanceController.checkOutAttendance);
 
 module.exports = router;

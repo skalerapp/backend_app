@@ -8,6 +8,12 @@ const {
   canAccessProjectByOperationalScope,
 } = require('../operationalScopes/operationalScopes.service');
 const { toSqlDatetime, toBusinessDateKey } = require('../../utils/datetime.utils');
+const {
+  ATTENDANCE_EVENT_TYPES,
+  resolveWorkdayProfile,
+  validateEventRegistration,
+  validateCheckoutAllowed,
+} = require('./attendanceWorkday');
 
 const normalizeRole = (roleValue) => {
   const raw = (roleValue || '')
@@ -97,6 +103,56 @@ const ensureAttendanceShape = async (connection) => {
   try {
     await connection.execute('ALTER TABLE attendance ADD COLUMN unproductive_reason VARCHAR(255) NULL');
   } catch (e) {}
+};
+
+const ensureAttendanceEventsShape = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS attendance_events (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      attendance_id INT NOT NULL,
+      event_type VARCHAR(40) NOT NULL,
+      recorded_at TIMESTAMP NOT NULL,
+      location_latitude DECIMAL(10, 8) NULL,
+      location_longitude DECIMAL(11, 8) NULL,
+      notes VARCHAR(255) NULL,
+      created_by_user_id INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (attendance_id) REFERENCES attendance(id) ON DELETE CASCADE,
+      UNIQUE KEY uniq_attendance_event (attendance_id, event_type),
+      INDEX idx_attendance_event_attendance (attendance_id),
+      INDEX idx_attendance_event_type (event_type)
+    )
+  `);
+};
+
+const fetchAttendanceEventsByIds = async (connection, attendanceIds = []) => {
+  if (!attendanceIds.length) return new Map();
+  const placeholders = attendanceIds.map(() => '?').join(', ');
+  const [rows] = await connection.execute(
+    `SELECT id, attendance_id, event_type, recorded_at, location_latitude, location_longitude, notes, created_by_user_id, created_at
+     FROM attendance_events
+     WHERE attendance_id IN (${placeholders})
+     ORDER BY recorded_at ASC, id ASC`,
+    attendanceIds
+  );
+
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = Number(row.attendance_id);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(row);
+  }
+  return grouped;
+};
+
+const attachEventsToAttendanceRows = async (connection, rows = []) => {
+  const attendanceIds = rows.map((row) => Number(row.id)).filter((id) => Number.isInteger(id) && id > 0);
+  const grouped = await fetchAttendanceEventsByIds(connection, attendanceIds);
+  return rows.map((row) => ({
+    ...row,
+    workday_profile: resolveWorkdayProfile(row.app_user_role),
+    events: grouped.get(Number(row.id)) || [],
+  }));
 };
 
 const normalizeTimeCategory = (value) => {
@@ -338,6 +394,7 @@ const getAttendance = async (req, res) => {
     const { employee_id, user_id, attendance_date, date_from, date_to } = req.query;
     const rows = await withDbConnection(async (connection) => {
       await ensureAttendanceShape(connection);
+      await ensureAttendanceEventsShape(connection);
       await ensureOperationalScopeShape(connection);
 
       const { where, params } = buildAttendanceFilters({
@@ -356,7 +413,7 @@ const getAttendance = async (req, res) => {
         params
       );
 
-      return result;
+      return await attachEventsToAttendanceRows(connection, result);
     });
 
     res.json({ success: true, data: rows });
@@ -653,14 +710,19 @@ const checkOutAttendance = async (req, res) => {
 
     await withDbConnection(async (connection) => {
       await ensureAttendanceShape(connection);
+      await ensureAttendanceEventsShape(connection);
       await ensureOperationalScopeShape(connection);
       const normalizedRole = normalizeRole(req.user?.role);
 
       const [rows] = await connection.execute(
-        `SELECT a.*, COALESCE(e.user_id, e_by_user.user_id) AS employee_user_id
+        `SELECT a.*,
+                COALESCE(e.user_id, e_by_user.user_id) AS employee_user_id,
+                COALESCE(user_direct.role, u.role, '') AS app_user_role
          FROM attendance a
          LEFT JOIN employees e ON e.id = a.employee_id
          LEFT JOIN employees e_by_user ON a.user_id IS NOT NULL AND e_by_user.user_id = a.user_id
+         LEFT JOIN users user_direct ON a.user_id = user_direct.id
+         LEFT JOIN users u ON e.user_id = u.id
          WHERE a.id = ?`,
         [id]
       );
@@ -707,6 +769,22 @@ const checkOutAttendance = async (req, res) => {
         }
       }
 
+      if (existing.check_out) {
+        throw new HttpError(400, 'Este registro ya tiene salida registrada');
+      }
+
+      const [eventRows] = await connection.execute(
+        'SELECT event_type FROM attendance_events WHERE attendance_id = ? ORDER BY recorded_at ASC, id ASC',
+        [id]
+      );
+      const checkoutValidation = validateCheckoutAllowed({
+        roleValue: existing.app_user_role || normalizedRole,
+        events: eventRows,
+      });
+      if (!checkoutValidation.ok) {
+        throw new HttpError(400, checkoutValidation.message);
+      }
+
       await applyAuditContext(connection, req);
       const normalizedCategory = normalizeTimeCategory(time_category || existing.time_category);
       const normalizedReason = normalizedCategory === 'unproductive'
@@ -739,6 +817,108 @@ const checkOutAttendance = async (req, res) => {
     res.json({ success: true, message: 'Check-out registrado' });
   } catch (error) {
     sendControllerError(res, error, 'Error al registrar check-out');
+  }
+};
+
+const registerAttendanceEvent = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { event_type, location_latitude, location_longitude, notes } = req.body;
+
+    const event = await withDbConnection(async (connection) => {
+      await ensureAttendanceShape(connection);
+      await ensureAttendanceEventsShape(connection);
+      await ensureOperationalScopeShape(connection);
+      const normalizedRole = normalizeRole(req.user?.role);
+
+      const [rows] = await connection.execute(
+        `SELECT a.*,
+                COALESCE(e.user_id, e_by_user.user_id) AS employee_user_id,
+                COALESCE(user_direct.role, u.role, '') AS app_user_role
+         FROM attendance a
+         LEFT JOIN employees e ON e.id = a.employee_id
+         LEFT JOIN employees e_by_user ON a.user_id IS NOT NULL AND e_by_user.user_id = a.user_id
+         LEFT JOIN users user_direct ON a.user_id = user_direct.id
+         LEFT JOIN users u ON e.user_id = u.id
+         WHERE a.id = ?`,
+        [id]
+      );
+      if (!rows.length) {
+        throw new HttpError(404, 'Registro no encontrado');
+      }
+
+      const existing = rows[0];
+      const ownerUserId = Number(existing.user_id || existing.employee_user_id || 0);
+
+      if (normalizedRole === 'employee' || normalizedRole === 'operational_employee' || normalizedRole === 'warehouse_logistics' || normalizedRole === 'hse') {
+        const [ownedRows] = await connection.execute(
+          `SELECT a.id
+           FROM attendance a
+           INNER JOIN employees e ON a.employee_id = e.id
+           WHERE a.id = ? AND e.user_id = ?
+           LIMIT 1`,
+          [id, req.user.id]
+        );
+        if (!ownedRows.length) {
+          throw new HttpError(403, 'Solo puedes registrar hitos en tu propia jornada');
+        }
+      }
+
+      if (existing.check_out) {
+        throw new HttpError(400, 'La jornada ya está cerrada');
+      }
+
+      const [eventRows] = await connection.execute(
+        'SELECT event_type FROM attendance_events WHERE attendance_id = ? ORDER BY recorded_at ASC, id ASC',
+        [id]
+      );
+      const validation = validateEventRegistration({
+        roleValue: existing.app_user_role || normalizedRole,
+        events: eventRows,
+        eventType: event_type,
+      });
+      if (!validation.ok) {
+        throw new HttpError(400, validation.message);
+      }
+
+      const recordedAt = toSqlDatetime(new Date());
+      await applyAuditContext(connection, req);
+      const [result] = await connection.execute(
+        `INSERT INTO attendance_events (
+          attendance_id, event_type, recorded_at, location_latitude, location_longitude, notes, created_by_user_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          validation.eventType,
+          recordedAt,
+          location_latitude ?? null,
+          location_longitude ?? null,
+          notes ?? null,
+          req.user?.id ?? null,
+          recordedAt,
+        ]
+      );
+
+      return {
+        id: result.insertId,
+        attendance_id: Number(id),
+        event_type: validation.eventType,
+        recorded_at: recordedAt,
+        location_latitude: location_latitude ?? null,
+        location_longitude: location_longitude ?? null,
+        notes: notes ?? null,
+        created_by_user_id: req.user?.id ?? null,
+        created_at: recordedAt,
+      };
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Hito de jornada registrado',
+      data: event,
+    });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al registrar hito de jornada');
   }
 };
 
@@ -864,8 +1044,10 @@ module.exports = {
   exportAttendanceReport,
   checkInAttendance,
   checkOutAttendance,
+  registerAttendanceEvent,
   getProductivitySummary,
   ensureAttendanceShape,
+  ensureAttendanceEventsShape,
   backfillAttendanceIdentity,
   resolveAttendanceIdentity,
   canExportHrAttendanceReport,
