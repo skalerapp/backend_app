@@ -26,6 +26,25 @@ const normalizeDateValue = (value) => {
   return text;
 };
 
+const normalizeTimeValue = (value) => {
+  if (value === null || value === undefined) return null;
+  const text = value.toString().trim();
+  if (!text) return null;
+
+  const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(text);
+  if (!match) {
+    throw new HttpError(400, 'Formato de hora inválido. Usa HH:mm');
+  }
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour > 23 || minute > 59) {
+    throw new HttpError(400, 'Formato de hora inválido. Usa HH:mm');
+  }
+
+  return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:00`;
+};
+
 const normalizeNullableText = (value, maxLength = 5000) => {
   if (value == null) return null;
   const text = value.toString().trim();
@@ -247,6 +266,8 @@ const ensureLaborPermissionsTable = async (connection) => {
     ['approver_user_id', 'INT NULL'],
     ['decided_at', 'DATETIME NULL'],
     ['decision_notes', 'TEXT NULL'],
+    ['start_time', 'TIME NULL'],
+    ['end_time', 'TIME NULL'],
   ];
 
   for (const [columnName, definition] of columns) {
@@ -281,6 +302,25 @@ const validateDateRange = (startDate, endDate) => {
   const end = normalizeDateValue(endDate);
   if (start && end && start > end) {
     throw new HttpError(400, 'La fecha de fin no puede ser anterior a la fecha de inicio');
+  }
+};
+
+const validateTimeRange = ({ startDate, endDate, startTime, endTime }) => {
+  const hasStartTime = Boolean(startTime);
+  const hasEndTime = Boolean(endTime);
+
+  if (hasStartTime !== hasEndTime) {
+    throw new HttpError(400, 'Debes registrar hora de inicio y hora de fin');
+  }
+
+  if (!hasStartTime) {
+    return;
+  }
+
+  const normalizedStartDate = normalizeDateValue(startDate);
+  const normalizedEndDate = normalizeDateValue(endDate);
+  if (normalizedStartDate === normalizedEndDate && startTime >= endTime) {
+    throw new HttpError(400, 'La hora de fin debe ser posterior a la hora de inicio');
   }
 };
 
@@ -335,7 +375,7 @@ const getLaborPermissionById = async (req, res) => {
 
 const createLaborPermission = async (req, res) => {
   try {
-    const { employee_id, permission_type, start_date, end_date, reason } = req.body;
+    const { employee_id, permission_type, start_date, end_date, start_time, end_time, reason } = req.body;
 
     if (!employee_id || !start_date || !end_date) {
       return res.status(400).json({
@@ -345,6 +385,14 @@ const createLaborPermission = async (req, res) => {
     }
 
     validateDateRange(start_date, end_date);
+    const normalizedStartTime = normalizeTimeValue(start_time);
+    const normalizedEndTime = normalizeTimeValue(end_time);
+    validateTimeRange({
+      startDate: start_date,
+      endDate: end_date,
+      startTime: normalizedStartTime,
+      endTime: normalizedEndTime,
+    });
 
     const laborPermissionId = await withDbConnection(async (connection) => {
       await ensureLaborPermissionsTable(connection);
@@ -368,13 +416,15 @@ const createLaborPermission = async (req, res) => {
       await applyAuditContext(connection, req);
       const [result] = await connection.execute(
         `INSERT INTO labor_permissions
-         (employee_id, permission_type, start_date, end_date, reason, status, requested_by_user_id, created_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, NOW())`,
+         (employee_id, permission_type, start_date, end_date, start_time, end_time, reason, status, requested_by_user_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NOW())`,
         [
           employee_id,
           permission_type || null,
           start_date,
           end_date,
+          normalizedStartTime,
+          normalizedEndTime,
           reason || null,
           req.user?.id || null,
         ]
@@ -396,7 +446,7 @@ const createLaborPermission = async (req, res) => {
 const updateLaborPermission = async (req, res) => {
   try {
     const { id } = req.params;
-    const { employee_id, permission_type, start_date, end_date, reason, status } = req.body;
+    const { employee_id, permission_type, start_date, end_date, start_time, end_time, reason, status } = req.body;
 
     await withDbConnection(async (connection) => {
       await ensureLaborPermissionsTable(connection);
@@ -448,16 +498,27 @@ const updateLaborPermission = async (req, res) => {
       const nextEndDate = end_date ?? existing.end_date;
       validateDateRange(nextStartDate, nextEndDate);
 
+      const nextStartTime = start_time !== undefined ? normalizeTimeValue(start_time) : existing.start_time;
+      const nextEndTime = end_time !== undefined ? normalizeTimeValue(end_time) : existing.end_time;
+      validateTimeRange({
+        startDate: nextStartDate,
+        endDate: nextEndDate,
+        startTime: nextStartTime,
+        endTime: nextEndTime,
+      });
+
       await applyAuditContext(connection, req);
       await connection.execute(
         `UPDATE labor_permissions
-         SET employee_id = ?, permission_type = ?, start_date = ?, end_date = ?, reason = ?, updated_at = NOW()
+         SET employee_id = ?, permission_type = ?, start_date = ?, end_date = ?, start_time = ?, end_time = ?, reason = ?, updated_at = NOW()
          WHERE id = ?`,
         [
           nextEmployeeId,
           permission_type ?? existing.permission_type,
           nextStartDate,
           nextEndDate,
+          nextStartTime,
+          nextEndTime,
           reason ?? existing.reason,
           id,
         ]
