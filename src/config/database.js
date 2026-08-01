@@ -71,6 +71,7 @@ const dbConfig = {
   keepAliveInitialDelay: 0,
   ssl: resolveSslConfig(),
   timezone: resolveAppTimezoneOffset(),
+  dateStrings: true,
 };
 
 const configurePoolTimezone = (poolInstance) => {
@@ -95,6 +96,7 @@ const pool = connectionString.length > 0
     keepAliveInitialDelay: 0,
     ssl: resolveSslConfig(),
     timezone: resolveAppTimezoneOffset(),
+    dateStrings: true,
   })
   : mysql.createPool(dbConfig);
 

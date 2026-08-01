@@ -2,6 +2,8 @@ const {
   toSqlDatetime,
   toBusinessDateKey,
   resolveAppTimezoneOffset,
+  formatDatetimeForApi,
+  normalizeRowDatetimes,
 } = require('../src/utils/datetime.utils');
 
 describe('datetime utils', () => {
@@ -35,6 +37,22 @@ describe('datetime utils', () => {
 
     expect(toSqlDatetime(utcInstant)).toBe('2026-07-02 19:39:42');
     expect(toBusinessDateKey(utcInstant)).toBe('2026-07-02');
+  });
+
+  it('formats API datetimes without timezone suffix', () => {
+    process.env.APP_TIMEZONE = 'America/Bogota';
+    expect(formatDatetimeForApi('2026-08-01 14:18:24')).toBe('2026-08-01 14:18:24');
+    expect(formatDatetimeForApi(new Date('2026-08-01T19:18:24.000Z'))).toBe('2026-08-01 14:18:24');
+  });
+
+  it('normalizes row datetime fields for API responses', () => {
+    process.env.APP_TIMEZONE = 'America/Bogota';
+    const row = normalizeRowDatetimes(
+      { id: 1, check_in: new Date('2026-08-01T19:18:24.000Z'), check_out: null },
+      ['check_in', 'check_out'],
+    );
+    expect(row.check_in).toBe('2026-08-01 14:18:24');
+    expect(row.check_out).toBeNull();
   });
 
   it('defaults app timezone offset to Colombia', () => {

@@ -8,6 +8,7 @@ const {
   buildOperationalVisibilityFilter,
   canAccessProjectByOperationalScope,
 } = require('../operationalScopes/operationalScopes.service');
+const { toSqlDatetime } = require('../../utils/datetime.utils');
 
 const normalizeRole = (roleValue) => {
   const raw = (roleValue || '')
@@ -410,12 +411,12 @@ const updateActivity = async (req, res) => {
       const stts = nextStatus;
 
       if (nextStatus === 'in_progress' && previousStatus !== 'in_progress' && (st == null || st === '')) {
+        const startedAt = toSqlDatetime(new Date());
         await connection.execute(
-          'UPDATE activities SET start_time = NOW() WHERE id = ? AND start_time IS NULL',
-          [id]
+          'UPDATE activities SET start_time = ? WHERE id = ? AND start_time IS NULL',
+          [startedAt, id]
         );
-        const [startedRows] = await connection.execute('SELECT start_time FROM activities WHERE id = ?', [id]);
-        st = startedRows[0]?.start_time ?? st;
+        st = startedAt;
       }
 
       if (
@@ -424,19 +425,20 @@ const updateActivity = async (req, res) => {
         previousStatus !== 'cancelled' &&
         (et == null || et === '')
       ) {
+        const endedAt = toSqlDatetime(new Date());
         await connection.execute(
-          'UPDATE activities SET end_time = NOW() WHERE id = ? AND end_time IS NULL',
-          [id]
+          'UPDATE activities SET end_time = ? WHERE id = ? AND end_time IS NULL',
+          [endedAt, id]
         );
-        const [finishedRows] = await connection.execute('SELECT end_time FROM activities WHERE id = ?', [id]);
-        et = finishedRows[0]?.end_time ?? et;
+        et = endedAt;
       }
 
       await applyAuditContext(connection, req);
+      const updatedAt = toSqlDatetime(new Date());
       await connection.execute(
-        `UPDATE activities SET project_id = ?, employee_id = ?, description = ?, start_time = ?, end_time = ?, status = ?, executed_area_m2 = ?, executed_length_ml = ?, updated_at = NOW()
+        `UPDATE activities SET project_id = ?, employee_id = ?, description = ?, start_time = ?, end_time = ?, status = ?, executed_area_m2 = ?, executed_length_ml = ?, updated_at = ?
          WHERE id = ?`,
-        [pid, eid, desc, st, et, stts, resolvedExecutedArea, resolvedExecutedLength, id]
+        [pid, eid, desc, st, et, stts, resolvedExecutedArea, resolvedExecutedLength, updatedAt, id]
       );
       await syncLegacyActivityRow(connection, id);
     });

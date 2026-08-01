@@ -1,5 +1,6 @@
 const DEFAULT_APP_TIMEZONE = 'America/Bogota';
 const DEFAULT_APP_TIMEZONE_OFFSET = '-05:00';
+const SQL_DATETIME_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 const resolveAppTimezone = () => {
   const configured = (process.env.APP_TIMEZONE || '').trim();
@@ -35,7 +36,43 @@ const toSqlDatetime = (date = new Date()) => {
   return `${pick('year')}-${pick('month')}-${pick('day')} ${hour}:${pick('minute')}:${pick('second')}`;
 };
 
+const nowSql = () => toSqlDatetime(new Date());
+
 const toBusinessDateKey = (date = new Date()) => toSqlDatetime(date).slice(0, 10);
+
+const formatDatetimeForApi = (value) => {
+  if (value == null || value === '') return null;
+
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return toSqlDatetime(value);
+  }
+
+  const raw = value.toString().trim();
+  if (!raw) return null;
+
+  if (SQL_DATETIME_PATTERN.test(raw)) {
+    return raw;
+  }
+
+  const parsed = new Date(raw.includes('T') ? raw : raw.replace(' ', 'T'));
+  if (Number.isNaN(parsed.getTime())) {
+    return raw;
+  }
+
+  return toSqlDatetime(parsed);
+};
+
+const normalizeRowDatetimes = (row, fields) => {
+  if (!row || typeof row !== 'object') return row;
+  const normalized = { ...row };
+  for (const field of fields) {
+    if (Object.prototype.hasOwnProperty.call(normalized, field)) {
+      normalized[field] = formatDatetimeForApi(normalized[field]);
+    }
+  }
+  return normalized;
+};
 
 module.exports = {
   DEFAULT_APP_TIMEZONE,
@@ -43,5 +80,8 @@ module.exports = {
   resolveAppTimezone,
   resolveAppTimezoneOffset,
   toSqlDatetime,
+  nowSql,
   toBusinessDateKey,
+  formatDatetimeForApi,
+  normalizeRowDatetimes,
 };

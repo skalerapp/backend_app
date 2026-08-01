@@ -7,7 +7,7 @@ const {
   buildOperationalVisibilityFilter,
   canAccessProjectByOperationalScope,
 } = require('../operationalScopes/operationalScopes.service');
-const { toSqlDatetime, toBusinessDateKey } = require('../../utils/datetime.utils');
+const { toSqlDatetime, toBusinessDateKey, normalizeRowDatetimes } = require('../../utils/datetime.utils');
 const {
   ATTENDANCE_EVENT_TYPES,
   resolveWorkdayProfile,
@@ -58,18 +58,32 @@ const normalizeRole = (roleValue) => {
   }
 };
 
+const ATTENDANCE_DATETIME_FIELDS = ['check_in', 'check_out', 'created_at', 'updated_at'];
+const ATTENDANCE_EVENT_DATETIME_FIELDS = ['recorded_at', 'created_at'];
+
+const migrateColumnToDatetime = async (connection, table, column, nullable = true) => {
+  try {
+    const nullSql = nullable ? 'NULL' : 'NOT NULL';
+    await connection.execute(`ALTER TABLE ${table} MODIFY COLUMN ${column} DATETIME ${nullSql}`);
+  } catch (e) {}
+};
+
+const normalizeAttendanceRow = (row) => normalizeRowDatetimes(row, ATTENDANCE_DATETIME_FIELDS);
+
+const normalizeAttendanceEventRow = (row) => normalizeRowDatetimes(row, ATTENDANCE_EVENT_DATETIME_FIELDS);
+
 const ensureAttendanceShape = async (connection) => {
   await connection.execute(`
     CREATE TABLE IF NOT EXISTS attendance (
       id INT PRIMARY KEY AUTO_INCREMENT,
       employee_id INT NOT NULL,
       project_id INT,
-      check_in TIMESTAMP NULL,
-      check_out TIMESTAMP NULL,
+      check_in DATETIME NULL,
+      check_out DATETIME NULL,
       location_latitude DECIMAL(10, 8),
       location_longitude DECIMAL(11, 8),
       attendance_date DATE NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (employee_id) REFERENCES employees(id),
       FOREIGN KEY (project_id) REFERENCES projects(id),
       INDEX idx_employee (employee_id),
@@ -96,7 +110,7 @@ const ensureAttendanceShape = async (connection) => {
     await connection.execute('ALTER TABLE attendance ADD COLUMN checkout_photo_path VARCHAR(500) NULL');
   } catch (e) {}
   try {
-    await connection.execute('ALTER TABLE attendance ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+    await connection.execute('ALTER TABLE attendance ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
   } catch (e) {}
   try {
     await connection.execute("ALTER TABLE attendance ADD COLUMN time_category VARCHAR(30) NOT NULL DEFAULT 'productive'");
@@ -104,6 +118,10 @@ const ensureAttendanceShape = async (connection) => {
   try {
     await connection.execute('ALTER TABLE attendance ADD COLUMN unproductive_reason VARCHAR(255) NULL');
   } catch (e) {}
+
+  for (const column of ATTENDANCE_DATETIME_FIELDS) {
+    await migrateColumnToDatetime(connection, 'attendance', column, column !== 'created_at');
+  }
 };
 
 const ensureAttendanceEventsShape = async (connection) => {
@@ -112,18 +130,22 @@ const ensureAttendanceEventsShape = async (connection) => {
       id INT PRIMARY KEY AUTO_INCREMENT,
       attendance_id INT NOT NULL,
       event_type VARCHAR(40) NOT NULL,
-      recorded_at TIMESTAMP NOT NULL,
+      recorded_at DATETIME NOT NULL,
       location_latitude DECIMAL(10, 8) NULL,
       location_longitude DECIMAL(11, 8) NULL,
       notes VARCHAR(255) NULL,
       created_by_user_id INT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (attendance_id) REFERENCES attendance(id) ON DELETE CASCADE,
       UNIQUE KEY uniq_attendance_event (attendance_id, event_type),
       INDEX idx_attendance_event_attendance (attendance_id),
       INDEX idx_attendance_event_type (event_type)
     )
   `);
+
+  for (const column of ATTENDANCE_EVENT_DATETIME_FIELDS) {
+    await migrateColumnToDatetime(connection, 'attendance_events', column, column !== 'recorded_at');
+  }
 };
 
 const fetchAttendanceEventsByIds = async (connection, attendanceIds = []) => {
@@ -141,7 +163,7 @@ const fetchAttendanceEventsByIds = async (connection, attendanceIds = []) => {
   for (const row of rows) {
     const key = Number(row.attendance_id);
     if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push(row);
+    grouped.get(key).push(normalizeAttendanceEventRow(row));
   }
   return grouped;
 };
@@ -150,7 +172,7 @@ const attachEventsToAttendanceRows = async (connection, rows = []) => {
   const attendanceIds = rows.map((row) => Number(row.id)).filter((id) => Number.isInteger(id) && id > 0);
   const grouped = await fetchAttendanceEventsByIds(connection, attendanceIds);
   return rows.map((row) => ({
-    ...row,
+    ...normalizeAttendanceRow(row),
     workday_profile: resolveWorkdayProfile(row.app_user_role),
     events: grouped.get(Number(row.id)) || [],
   }));
