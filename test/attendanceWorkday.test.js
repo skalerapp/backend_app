@@ -7,14 +7,14 @@ const {
 } = require('../src/modules/attendance/attendanceWorkday');
 
 describe('attendanceWorkday', () => {
-  test('maps operational roles to full operations profile', () => {
+    test('maps operational roles to full operations profile', () => {
     expect(resolveWorkdayProfile('operational_employee')).toBe(WORKDAY_PROFILES.FULL_OPERATIONS);
     expect(resolveWorkdayProfile('leader')).toBe(WORKDAY_PROFILES.FULL_OPERATIONS);
     expect(resolveWorkdayProfile('supervisor')).toBe(WORKDAY_PROFILES.FULL_OPERATIONS);
-    expect(resolveWorkdayProfile('coordinator_operations')).toBe(WORKDAY_PROFILES.FULL_OPERATIONS);
   });
 
-  test('maps hse, administrative, warehouse and commercial to lunch-only profile', () => {
+  test('maps coordinator, hse, administrative, warehouse and commercial to lunch-only profile', () => {
+    expect(resolveWorkdayProfile('coordinator_operations')).toBe(WORKDAY_PROFILES.LUNCH_BREAK_ONLY);
     expect(resolveWorkdayProfile('hse')).toBe(WORKDAY_PROFILES.LUNCH_BREAK_ONLY);
     expect(resolveWorkdayProfile('administrative')).toBe(WORKDAY_PROFILES.LUNCH_BREAK_ONLY);
     expect(resolveWorkdayProfile('warehouse_logistics')).toBe(WORKDAY_PROFILES.LUNCH_BREAK_ONLY);

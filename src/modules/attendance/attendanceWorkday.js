@@ -60,10 +60,10 @@ const WORKDAY_PROFILES = Object.freeze({
 
 const resolveWorkdayProfile = (roleValue) => {
   const role = normalizeRole(roleValue);
-  if (['operational_employee', 'leader', 'supervisor', 'coordinator_operations'].includes(role)) {
+  if (['operational_employee', 'leader', 'supervisor'].includes(role)) {
     return WORKDAY_PROFILES.FULL_OPERATIONS;
   }
-  if (['hse', 'administrative', 'warehouse_logistics', 'commercial'].includes(role)) {
+  if (['hse', 'administrative', 'warehouse_logistics', 'commercial', 'coordinator_operations'].includes(role)) {
     return WORKDAY_PROFILES.LUNCH_BREAK_ONLY;
   }
   return WORKDAY_PROFILES.BASIC;

@@ -14,6 +14,7 @@ const {
   validateEventRegistration,
   validateCheckoutAllowed,
 } = require('./attendanceWorkday');
+const { computeAttendanceProductivity } = require('./attendanceProductivity');
 
 const normalizeRole = (roleValue) => {
   const raw = (roleValue || '')
@@ -706,7 +707,9 @@ const checkInAttendance = async (req, res) => {
 const checkOutAttendance = async (req, res) => {
   try {
     const { id } = req.params;
-    const { location_latitude, location_longitude, photo_path, time_category, unproductive_reason } = req.body;
+    const { location_latitude, location_longitude, photo_path } = req.body;
+
+    let productivitySummary = null;
 
     await withDbConnection(async (connection) => {
       await ensureAttendanceShape(connection);
@@ -774,7 +777,7 @@ const checkOutAttendance = async (req, res) => {
       }
 
       const [eventRows] = await connection.execute(
-        'SELECT event_type FROM attendance_events WHERE attendance_id = ? ORDER BY recorded_at ASC, id ASC',
+        'SELECT event_type, recorded_at FROM attendance_events WHERE attendance_id = ? ORDER BY recorded_at ASC, id ASC',
         [id]
       );
       const checkoutValidation = validateCheckoutAllowed({
@@ -785,11 +788,12 @@ const checkOutAttendance = async (req, res) => {
         throw new HttpError(400, checkoutValidation.message);
       }
 
+      const productivity = await computeAttendanceProductivity(connection, existing, eventRows);
+      productivitySummary = productivity;
+
       await applyAuditContext(connection, req);
-      const normalizedCategory = normalizeTimeCategory(time_category || existing.time_category);
-      const normalizedReason = normalizedCategory === 'unproductive'
-        ? (unproductive_reason || existing.unproductive_reason || null)
-        : null;
+      const normalizedCategory = productivity.time_category;
+      const normalizedReason = productivity.unproductive_reason;
       const checkOutAt = toSqlDatetime(new Date());
       await connection.execute(
         `UPDATE attendance
@@ -814,7 +818,11 @@ const checkOutAttendance = async (req, res) => {
       );
     });
 
-    res.json({ success: true, message: 'Check-out registrado' });
+    res.json({
+      success: true,
+      message: 'Check-out registrado',
+      productivity: productivitySummary,
+    });
   } catch (error) {
     sendControllerError(res, error, 'Error al registrar check-out');
   }
