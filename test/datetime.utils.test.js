@@ -59,4 +59,22 @@ describe('datetime utils', () => {
     delete process.env.APP_TIMEZONE_OFFSET;
     expect(resolveAppTimezoneOffset()).toBe('-05:00');
   });
+
+  it('parses SQL datetimes using app timezone instead of server local time', () => {
+    const {
+      parseSqlDatetimeInAppTimezone,
+      isSqlDatetimePast,
+    } = require('../src/utils/datetime.utils');
+
+    process.env.APP_TIMEZONE_OFFSET = '-05:00';
+
+    const parsed = parseSqlDatetimeInAppTimezone('2026-08-05 17:10:24');
+    expect(parsed.toISOString()).toBe('2026-08-05T22:10:24.000Z');
+
+    const beforeExpiry = new Date('2026-08-05T21:42:00.000Z').getTime();
+    expect(isSqlDatetimePast('2026-08-05 17:10:24', beforeExpiry)).toBe(false);
+
+    const afterExpiry = new Date('2026-08-05T22:15:00.000Z').getTime();
+    expect(isSqlDatetimePast('2026-08-05 17:10:24', afterExpiry)).toBe(true);
+  });
 });

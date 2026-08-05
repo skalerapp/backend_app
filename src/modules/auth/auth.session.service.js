@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { pool } = require('../../config/database');
-const { toSqlDatetime } = require('../../utils/datetime.utils');
+const { toSqlDatetime, parseSqlDatetimeInAppTimezone, getSqlDatetimeMillis, isSqlDatetimePast } = require('../../utils/datetime.utils');
 
 const authSessionSchemaState = {
   ready: false,
@@ -19,6 +19,7 @@ const DEFAULT_APP_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_TICKET_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_HEARTBEAT_TTL_MS = 90 * 1000;
+const DEFAULT_BRIDGE_HEARTBEAT_TTL_MS = 5 * 60 * 1000;
 
 const addMilliseconds = (date, milliseconds) => new Date(date.getTime() + milliseconds);
 
@@ -55,6 +56,7 @@ const appSessionTtlMs = () => parseDurationToMs(process.env.JWT_EXPIRE, DEFAULT_
 const webSessionTtlMs = () => parseDurationToMs(process.env.WEB_SESSION_EXPIRE, DEFAULT_WEB_SESSION_TTL_MS);
 const ticketTtlMs = () => parseDurationToMs(process.env.WEB_LAUNCH_TICKET_EXPIRE, DEFAULT_TICKET_TTL_MS);
 const heartbeatTtlMs = () => parseDurationToMs(process.env.APP_SESSION_HEARTBEAT_TTL, DEFAULT_HEARTBEAT_TTL_MS);
+const bridgeHeartbeatTtlMs = () => parseDurationToMs(process.env.WEB_LAUNCH_HEARTBEAT_TTL, DEFAULT_BRIDGE_HEARTBEAT_TTL_MS);
 
 const createId = (size = 24) => crypto.randomBytes(size).toString('hex');
 
@@ -403,7 +405,7 @@ const getWebLaunchTicketState = async ({ ticketCode }) => {
       return { valid: false, reason: 'ticket_used_or_revoked', ticketStatus };
     }
 
-    if (ticket.expires_at && new Date(ticket.expires_at).getTime() <= now) {
+    if (ticket.expires_at && isSqlDatetimePast(ticket.expires_at, now)) {
       return { valid: false, reason: 'ticket_expired', ticketStatus };
     }
 
@@ -411,12 +413,12 @@ const getWebLaunchTicketState = async ({ ticketCode }) => {
       return { valid: false, reason: 'app_session_revoked', ticketStatus };
     }
 
-    if (ticket.app_expires_at && new Date(ticket.app_expires_at).getTime() <= now) {
+    if (ticket.app_expires_at && isSqlDatetimePast(ticket.app_expires_at, now)) {
       return { valid: false, reason: 'app_session_expired', ticketStatus };
     }
 
-    const appLastSeenAt = ticket.app_last_seen_at ? new Date(ticket.app_last_seen_at).getTime() : 0;
-    if (appLastSeenAt + heartbeatTtlMs() <= now) {
+    const appLastSeenAt = getSqlDatetimeMillis(ticket.app_last_seen_at) || 0;
+    if (appLastSeenAt + bridgeHeartbeatTtlMs() <= now) {
       return { valid: false, reason: 'app_session_inactive', ticketStatus };
     }
 
@@ -455,9 +457,10 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
 
     const ticket = ticketRows[0];
     const now = new Date();
-    const ticketExpiry = ticket.expires_at ? new Date(ticket.expires_at) : null;
-    const appExpiry = ticket.app_expires_at ? new Date(ticket.app_expires_at) : null;
-    const appLastSeenAt = ticket.app_last_seen_at ? new Date(ticket.app_last_seen_at).getTime() : 0;
+    const nowMs = now.getTime();
+    const ticketExpiry = ticket.expires_at ? parseSqlDatetimeInAppTimezone(ticket.expires_at) : null;
+    const appExpiry = ticket.app_expires_at ? parseSqlDatetimeInAppTimezone(ticket.app_expires_at) : null;
+    const appLastSeenAt = getSqlDatetimeMillis(ticket.app_last_seen_at) || 0;
 
     if (ticket.ticket_status === TICKET_STATUS_REVOKED) {
       await connection.rollback();
@@ -474,7 +477,7 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
       throw new Error('El enlace temporal ya fue usado o invalidado');
     }
 
-    if (ticketExpiry && ticketExpiry.getTime() <= now.getTime()) {
+    if (ticketExpiry && ticketExpiry.getTime() <= nowMs) {
       await connection.execute(
         'UPDATE auth_web_launch_tickets SET ticket_status = ?, updated_at = NOW() WHERE id = ?',
         [TICKET_STATUS_EXPIRED, ticket.id],
@@ -488,7 +491,7 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
       throw new Error('La sesión móvil asociada ya no está activa');
     }
 
-    if (appExpiry && appExpiry.getTime() <= now.getTime()) {
+    if (appExpiry && appExpiry.getTime() <= nowMs) {
       await connection.execute(
         'UPDATE auth_app_sessions SET session_status = ?, updated_at = NOW() WHERE id = ?',
         [SESSION_STATUS_EXPIRED, ticket.app_session_id],
@@ -497,7 +500,7 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
       throw new Error('La sesión móvil asociada ya expiró');
     }
 
-    if (appLastSeenAt + heartbeatTtlMs() <= now.getTime()) {
+    if (appLastSeenAt + bridgeHeartbeatTtlMs() <= nowMs) {
       await connection.rollback();
       throw new Error('La sesión móvil asociada ya no está activa');
     }
@@ -517,7 +520,7 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
     );
 
     const jwtSessionId = createId(24);
-    const expiresAt = appExpiry && appExpiry.getTime() > now.getTime()
+    const expiresAt = appExpiry && appExpiry.getTime() > nowMs
       ? appExpiry
       : addMilliseconds(now, webSessionTtlMs());
     const expiresAtSql = toSqlDatetime(expiresAt);
@@ -702,9 +705,9 @@ const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => 
 
       const item = rows[0];
       const now = Date.now();
-      const webExpiresAt = item.web_expires_at ? new Date(item.web_expires_at).getTime() : null;
-      const appExpiresAt = item.app_expires_at ? new Date(item.app_expires_at).getTime() : null;
-      const appLastSeenAt = item.app_last_seen_at ? new Date(item.app_last_seen_at).getTime() : 0;
+      const webExpiresAt = getSqlDatetimeMillis(item.web_expires_at);
+      const appExpiresAt = getSqlDatetimeMillis(item.app_expires_at);
+      const appLastSeenAt = getSqlDatetimeMillis(item.app_last_seen_at) || 0;
 
       if (item.web_status !== SESSION_STATUS_ACTIVE) {
         return { valid: false, reason: 'web_session_revoked' };
@@ -744,7 +747,7 @@ const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => 
 
       const item = rows[0];
       const now = Date.now();
-      const expiresAt = item.expires_at ? new Date(item.expires_at).getTime() : null;
+      const expiresAt = getSqlDatetimeMillis(item.expires_at);
       if (item.session_status !== SESSION_STATUS_ACTIVE) {
         return { valid: false, reason: 'session_revoked' };
       }

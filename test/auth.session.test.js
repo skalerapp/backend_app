@@ -123,6 +123,24 @@ describe('Auth web bridge sessions', () => {
     expect(consumeRes.body.message).toMatch(/revocado|usado|invalidado/i);
   });
 
+  it('accepts pending bridge ticket before SQL expires_at in app timezone', async () => {
+    const appToken = await loginAsAdmin();
+
+    const ticketRes = await request(app)
+      .post('/api/auth/web-launch-ticket')
+      .set('Authorization', `Bearer ${appToken}`);
+
+    expect(ticketRes.statusCode).toBe(201);
+    const ticket = ticketRes.body.data.ticket;
+    expect(ticket).toBeTruthy();
+
+    const statusRes = await request(app)
+      .get(`/api/auth/web-launch/${ticket}/status`);
+    expect(statusRes.statusCode).toBe(200);
+    expect(statusRes.body.data.valid).toBe(true);
+    expect(statusRes.body.data.ticketStatus).toBe('pending');
+  });
+
   afterAll(async () => {
     await closeDatabase();
   });

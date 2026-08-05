@@ -74,6 +74,37 @@ const normalizeRowDatetimes = (row, fields) => {
   return normalized;
 };
 
+const parseSqlDatetimeInAppTimezone = (value) => {
+  if (value == null || value === '') return null;
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  const raw = value.toString().trim();
+  if (!raw) return null;
+
+  if (SQL_DATETIME_PATTERN.test(raw)) {
+    const parsed = new Date(`${raw.replace(' ', 'T')}${resolveAppTimezoneOffset()}`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const isoCandidate = raw.includes('T') ? raw : raw.replace(' ', 'T');
+  const parsed = new Date(isoCandidate);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const getSqlDatetimeMillis = (value) => {
+  const parsed = parseSqlDatetimeInAppTimezone(value);
+  return parsed ? parsed.getTime() : null;
+};
+
+const isSqlDatetimePast = (value, nowMs = Date.now()) => {
+  const millis = getSqlDatetimeMillis(value);
+  if (millis == null) return false;
+  return millis <= nowMs;
+};
+
 module.exports = {
   DEFAULT_APP_TIMEZONE,
   DEFAULT_APP_TIMEZONE_OFFSET,
@@ -84,4 +115,7 @@ module.exports = {
   toBusinessDateKey,
   formatDatetimeForApi,
   normalizeRowDatetimes,
+  parseSqlDatetimeInAppTimezone,
+  getSqlDatetimeMillis,
+  isSqlDatetimePast,
 };
