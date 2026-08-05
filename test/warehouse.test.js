@@ -86,6 +86,63 @@ describe('Warehouse endpoints', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
+    expect(res.body.stock).toMatchObject({
+      previousStock: 3,
+      newStock: 4,
+      delta: 1,
+    });
+  });
+
+  it('GET /api/warehouse/assets reflects stock after project return', async () => {
+    const res = await request(app)
+      .get('/api/warehouse/assets')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.statusCode).toBe(200);
+    const asset = res.body.data.find((item) => item.id === assetId);
+    expect(asset).toBeTruthy();
+    expect(Number(asset.current_stock)).toBe(4);
+  });
+
+  it('POST /api/warehouse/movements decreases stock on delivery', async () => {
+    const res = await request(app)
+      .post('/api/warehouse/movements')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        asset_id: assetId,
+        project_id: projectId,
+        movement_type: 'delivery',
+        movement_date: '2026-04-11',
+        quantity: '2',
+        receiving_signature_name: 'Receptor Campo',
+        receiving_signature_data: JSON.stringify([{ x: 6.1, y: 14.2 }, { x: 15.9, y: 27.5 }, null]),
+      });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.stock).toMatchObject({
+      previousStock: 4,
+      newStock: 2,
+      delta: -2,
+    });
+  });
+
+  it('POST /api/warehouse/movements rejects delivery when stock is insufficient', async () => {
+    const res = await request(app)
+      .post('/api/warehouse/movements')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        asset_id: assetId,
+        project_id: projectId,
+        movement_type: 'delivery',
+        movement_date: '2026-04-12',
+        quantity: '50',
+        receiving_signature_name: 'Receptor Campo',
+        receiving_signature_data: JSON.stringify([{ x: 6.1, y: 14.2 }, { x: 15.9, y: 27.5 }, null]),
+      });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.message).toMatch(/Stock insuficiente/i);
   });
 
   it('GET /api/warehouse/movements exposes intake origin metadata', async () => {

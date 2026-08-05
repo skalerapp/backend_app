@@ -8,6 +8,7 @@ const {
   ensureWarehouseShape,
   generateNextAssetCode,
   isFleetAssetLike,
+  applyMovementStockAdjustment,
   normalizeIntakeOrigin,
   normalizeWarehouseAssetPayload,
   shouldImportWarehouseAsset,
@@ -358,6 +359,8 @@ const createMovement = async (req, res) => {
       ? null
       : delivery_signature_data || null;
 
+    let stockAdjustment = null;
+
     await withDbConnection(async (connection) => {
       await ensureWarehouseShape(connection);
 
@@ -366,6 +369,7 @@ const createMovement = async (req, res) => {
            id,
            asset_name,
            category_name,
+           current_stock,
            vehicle_plate,
            vehicle_type,
            insurance_due_date,
@@ -409,69 +413,89 @@ const createMovement = async (req, res) => {
         }
       }
 
-      await applyAuditContext(connection, req);
-      await connection.execute(
-        `INSERT INTO warehouse_asset_movements (
-           asset_id,
-           project_id,
-           movement_type,
-           movement_date,
-           work_order,
-           client_name,
-           dispatch_note,
-           evidence_path,
-           quantity,
-           serial_snapshot,
-           delivery_signature_name,
-           delivery_signature_data,
-           receiving_signature_name,
-           receiving_signature_data,
-           vehicle_plate_snapshot,
-           odometer_snapshot,
-           fuel_level_snapshot,
-           checklist_snapshot,
-           intake_origin,
-           intake_origin_project_id,
-           status_snapshot,
-           city_snapshot,
-           responsible_user_id,
-           receiver_user_id,
-           notes,
-           created_at,
-           updated_at
-         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-        [
-          assetId,
-          project_id || null,
-          normalizedMovementType,
-          movement_date || null,
-          work_order || null,
-          client_name || null,
-          dispatch_note || null,
-          evidence_path || null,
-          quantity || null,
-          serial_snapshot || null,
-          resolvedDeliverySignatureName,
-          resolvedDeliverySignatureData,
-          receiving_signature_name || null,
-          receiving_signature_data || null,
-          vehicle_plate_snapshot || null,
-          odometer_snapshot || null,
-          fuel_level_snapshot || null,
-          checklist_snapshot || null,
-          normalizedIntakeOrigin,
-          normalizedIntakeOriginProjectId,
-          status_snapshot || null,
-          city_snapshot || null,
-          resolvedResponsibleUserId,
-          receiver_user_id || null,
-          notes || null,
-        ]
-      );
+      await connection.beginTransaction();
+      try {
+        await applyAuditContext(connection, req);
+        await connection.execute(
+          `INSERT INTO warehouse_asset_movements (
+             asset_id,
+             project_id,
+             movement_type,
+             movement_date,
+             work_order,
+             client_name,
+             dispatch_note,
+             evidence_path,
+             quantity,
+             serial_snapshot,
+             delivery_signature_name,
+             delivery_signature_data,
+             receiving_signature_name,
+             receiving_signature_data,
+             vehicle_plate_snapshot,
+             odometer_snapshot,
+             fuel_level_snapshot,
+             checklist_snapshot,
+             intake_origin,
+             intake_origin_project_id,
+             status_snapshot,
+             city_snapshot,
+             responsible_user_id,
+             receiver_user_id,
+             notes,
+             created_at,
+             updated_at
+           )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            assetId,
+            project_id || null,
+            normalizedMovementType,
+            movement_date || null,
+            work_order || null,
+            client_name || null,
+            dispatch_note || null,
+            evidence_path || null,
+            quantity || null,
+            serial_snapshot || null,
+            resolvedDeliverySignatureName,
+            resolvedDeliverySignatureData,
+            receiving_signature_name || null,
+            receiving_signature_data || null,
+            vehicle_plate_snapshot || null,
+            odometer_snapshot || null,
+            fuel_level_snapshot || null,
+            checklist_snapshot || null,
+            normalizedIntakeOrigin,
+            normalizedIntakeOriginProjectId,
+            status_snapshot || null,
+            city_snapshot || null,
+            resolvedResponsibleUserId,
+            receiver_user_id || null,
+            notes || null,
+          ]
+        );
+
+        stockAdjustment = await applyMovementStockAdjustment(connection, {
+          asset,
+          movementType: normalizedMovementType,
+          quantity,
+        });
+
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
     });
 
-    res.json({ success: true, message: 'Movimiento de almacen registrado' });
+    res.json({
+      success: true,
+      message: stockAdjustment
+        ? `Movimiento registrado. Stock actualizado: ${stockAdjustment.previousStock} → ${stockAdjustment.newStock}`
+        : 'Movimiento de almacen registrado',
+      stock: stockAdjustment,
+    });
   } catch (error) {
     sendControllerError(res, error, 'Error al registrar movimiento de almacen');
   }

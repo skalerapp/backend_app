@@ -1,3 +1,5 @@
+const { HttpError } = require('../../utils/httpError');
+
 const normalizeText = (value) => {
   const raw = (value ?? '').toString().trim();
   if (!raw) return null;
@@ -110,6 +112,56 @@ const isFleetAssetLike = (asset) => {
     assetName.includes('vehiculo') ||
     assetName.includes('manlift') ||
     assetName.includes('bugui');
+};
+
+const STOCK_INCREASE_TYPES = new Set(['inspection', 'return']);
+const STOCK_DECREASE_TYPES = new Set(['delivery', 'assignment', 'sale', 'retirement']);
+
+const resolveStockDelta = (movementType, quantity) => {
+  const normalizedType = (movementType || '').toString().trim().toLowerCase();
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    return null;
+  }
+  if (STOCK_INCREASE_TYPES.has(normalizedType)) {
+    return qty;
+  }
+  if (STOCK_DECREASE_TYPES.has(normalizedType)) {
+    return -qty;
+  }
+  return null;
+};
+
+const applyMovementStockAdjustment = async (connection, { asset, movementType, quantity }) => {
+  if (isFleetAssetLike(asset)) {
+    return null;
+  }
+
+  const delta = resolveStockDelta(movementType, quantity);
+  if (delta === null) {
+    return null;
+  }
+
+  const current = Number.isFinite(Number(asset.current_stock)) ? Number(asset.current_stock) : 0;
+  const next = Number((current + delta).toFixed(4));
+  if (next < 0) {
+    throw new HttpError(
+      409,
+      `Stock insuficiente para ${asset.asset_name || 'el activo'}. Disponible: ${current}, solicitado: ${Math.abs(delta)}`
+    );
+  }
+
+  await connection.execute(
+    'UPDATE warehouse_assets SET current_stock = ?, updated_at = NOW() WHERE id = ?',
+    [next, asset.id]
+  );
+
+  return {
+    assetId: asset.id,
+    previousStock: current,
+    newStock: next,
+    delta,
+  };
 };
 
 const parseIsoDate = (value) => {
@@ -519,6 +571,8 @@ module.exports = {
   generateNextAssetCode,
   isFleetAssetLike,
   buildFleetDocumentAlerts,
+  resolveStockDelta,
+  applyMovementStockAdjustment,
   normalizeText,
   normalizeIntakeOrigin,
   parseFlexibleDate,
