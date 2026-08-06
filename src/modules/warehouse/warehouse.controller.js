@@ -3,6 +3,7 @@ const { withDbConnection } = db;
 const pool = db.pool;
 const { applyAuditContext } = require('../../utils/auditContext');
 const { HttpError, sendControllerError } = require('../../utils/httpError');
+const { normalizeRole } = require('../../middleware/auth.middleware');
 const {
   buildFleetDocumentAlerts,
   ensureWarehouseShape,
@@ -15,6 +16,37 @@ const {
   upsertWarehouseAsset,
   updateWarehouseAssetById,
 } = require('./warehouse.service');
+
+const DISPATCH_RECEIVER_ROLES = new Set([
+  'operational_employee',
+  'employee',
+  'leader',
+  'supervisor',
+  'gerencial',
+  'coordinator_operations',
+  'hse',
+]);
+
+const listDispatchReceivers = async (req, res) => {
+  try {
+    const rows = await withDbConnection(async (connection) => {
+      const [users] = await connection.execute(
+        `
+          SELECT id, name, role, status
+          FROM users
+          WHERE status = 'active'
+          ORDER BY name ASC
+        `,
+      );
+
+      return users.filter((user) => DISPATCH_RECEIVER_ROLES.has(normalizeRole(user.role)));
+    });
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    sendControllerError(res, error, 'No fue posible cargar receptores para despacho');
+  }
+};
 
 const listAssets = async (req, res) => {
   try {
@@ -503,6 +535,7 @@ const createMovement = async (req, res) => {
 
 module.exports = {
   listAssets,
+  listDispatchReceivers,
   createAsset,
   updateAsset,
   importAssets,

@@ -4,6 +4,7 @@ const controller = require('./warehouse.controller');
 const { verifyToken, verifyModuleAccess } = require('../../middleware/auth.middleware');
 
 router.get('/assets', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.listAssets);
+router.get('/dispatch-receivers', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.listDispatchReceivers);
 router.post('/assets', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.createAsset);
 router.put('/assets/:id', verifyToken, verifyModuleAccess('warehouse', 'update'), controller.updateAsset);
 router.post('/assets/import', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.importAssets);
