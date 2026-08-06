@@ -18,6 +18,7 @@ const TICKET_STATUS_REVOKED = 'revoked';
 const DEFAULT_APP_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_TICKET_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_WEB_BRIDGE_SESSION_TTL_MS = DEFAULT_TICKET_TTL_MS;
 const DEFAULT_HEARTBEAT_TTL_MS = 90 * 1000;
 const DEFAULT_BRIDGE_HEARTBEAT_TTL_MS = 5 * 60 * 1000;
 
@@ -55,8 +56,49 @@ const parseDurationToMs = (value, fallbackMs) => {
 const appSessionTtlMs = () => parseDurationToMs(process.env.JWT_EXPIRE, DEFAULT_APP_SESSION_TTL_MS);
 const webSessionTtlMs = () => parseDurationToMs(process.env.WEB_SESSION_EXPIRE, DEFAULT_WEB_SESSION_TTL_MS);
 const ticketTtlMs = () => parseDurationToMs(process.env.WEB_LAUNCH_TICKET_EXPIRE, DEFAULT_TICKET_TTL_MS);
+const webBridgeSessionTtlMs = () => parseDurationToMs(process.env.WEB_BRIDGE_SESSION_EXPIRE, DEFAULT_WEB_BRIDGE_SESSION_TTL_MS);
 const heartbeatTtlMs = () => parseDurationToMs(process.env.APP_SESSION_HEARTBEAT_TTL, DEFAULT_HEARTBEAT_TTL_MS);
 const bridgeHeartbeatTtlMs = () => parseDurationToMs(process.env.WEB_LAUNCH_HEARTBEAT_TTL, DEFAULT_BRIDGE_HEARTBEAT_TTL_MS);
+
+const resolveWebBridgeSessionExpiry = ({
+  now = new Date(),
+  appExpiresAt = null,
+  ticketExpiresAt = null,
+}) => {
+  const nowMs = now.getTime();
+  const candidates = [addMilliseconds(now, webBridgeSessionTtlMs())];
+
+  if (appExpiresAt instanceof Date && !Number.isNaN(appExpiresAt.getTime()) && appExpiresAt.getTime() > nowMs) {
+    candidates.push(appExpiresAt);
+  }
+
+  if (ticketExpiresAt instanceof Date && !Number.isNaN(ticketExpiresAt.getTime()) && ticketExpiresAt.getTime() > nowMs) {
+    candidates.push(ticketExpiresAt);
+  }
+
+  return candidates.reduce((earliest, candidate) => (
+    candidate.getTime() < earliest.getTime() ? candidate : earliest
+  ));
+};
+
+const ensureAuthSessionColumn = async (connection, tableName, columnName, definition) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT COUNT(*) AS total
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
+    `,
+    [tableName, columnName],
+  );
+
+  if (Number(rows[0]?.total || 0) > 0) {
+    return;
+  }
+
+  await connection.execute(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${definition}`);
+};
 
 const createId = (size = 24) => crypto.randomBytes(size).toString('hex');
 
@@ -140,6 +182,7 @@ const ensureAuthSessionSchema = async () => {
         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         jwt_session_id VARCHAR(96) NOT NULL,
         app_session_id BIGINT NOT NULL,
+        launch_ticket_id BIGINT NULL,
         user_id INT NOT NULL,
         session_status ENUM('active', 'revoked', 'expired') NOT NULL DEFAULT 'active',
         last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -150,9 +193,12 @@ const ensureAuthSessionSchema = async () => {
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_auth_web_sessions_jwt_session_id (jwt_session_id),
         KEY idx_auth_web_sessions_app_status (app_session_id, session_status),
-        KEY idx_auth_web_sessions_expires_at (expires_at)
+        KEY idx_auth_web_sessions_expires_at (expires_at),
+        KEY idx_auth_web_sessions_launch_ticket (launch_ticket_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+
+    await ensureAuthSessionColumn(connection, 'auth_web_sessions', 'launch_ticket_id', 'BIGINT NULL AFTER app_session_id');
 
     authSessionSchemaState.ready = true;
   } finally {
@@ -520,9 +566,12 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
     );
 
     const jwtSessionId = createId(24);
-    const expiresAt = appExpiry && appExpiry.getTime() > nowMs
-      ? appExpiry
-      : addMilliseconds(now, webSessionTtlMs());
+    const ticketExpiresAt = ticket.expires_at ? parseSqlDatetimeInAppTimezone(ticket.expires_at) : null;
+    const expiresAt = resolveWebBridgeSessionExpiry({
+      now,
+      appExpiresAt: appExpiry,
+      ticketExpiresAt,
+    });
     const expiresAtSql = toSqlDatetime(expiresAt);
 
     await connection.execute(
@@ -530,14 +579,15 @@ const consumeWebLaunchTicket = async ({ ticketCode, consumedByIp }) => {
         INSERT INTO auth_web_sessions (
           jwt_session_id,
           app_session_id,
+          launch_ticket_id,
           user_id,
           session_status,
           last_seen_at,
           expires_at
         )
-        VALUES (?, ?, ?, ?, NOW(), ?)
+        VALUES (?, ?, ?, ?, ?, NOW(), ?)
       `,
-      [jwtSessionId, ticket.app_session_id, ticket.user_id, SESSION_STATUS_ACTIVE, expiresAtSql],
+      [jwtSessionId, ticket.app_session_id, ticket.id, ticket.user_id, SESSION_STATUS_ACTIVE, expiresAtSql],
     );
 
     await connection.execute(
@@ -683,16 +733,25 @@ const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => 
       const [rows] = await connection.execute(
         `
           SELECT
-            web.id,
+            web.id AS web_id,
             web.app_session_id,
             web.session_status AS web_status,
             web.last_seen_at AS web_last_seen_at,
             web.expires_at AS web_expires_at,
             app.session_status AS app_status,
             app.last_seen_at AS app_last_seen_at,
-            app.expires_at AS app_expires_at
+            app.expires_at AS app_expires_at,
+            COALESCE(ticket.ticket_status, fallback_ticket.ticket_status) AS launch_ticket_status
           FROM auth_web_sessions web
           INNER JOIN auth_app_sessions app ON app.id = web.app_session_id
+          LEFT JOIN auth_web_launch_tickets ticket ON ticket.id = web.launch_ticket_id
+          LEFT JOIN auth_web_launch_tickets fallback_ticket ON (
+            web.launch_ticket_id IS NULL
+            AND fallback_ticket.app_session_id = web.app_session_id
+            AND fallback_ticket.consumed_at IS NOT NULL
+            AND fallback_ticket.consumed_at >= DATE_SUB(web.created_at, INTERVAL 2 MINUTE)
+            AND fallback_ticket.consumed_at <= DATE_ADD(web.created_at, INTERVAL 2 MINUTE)
+          )
           WHERE web.jwt_session_id = ?
           LIMIT 1
         `,
@@ -700,7 +759,7 @@ const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => 
       );
 
       if (rows.length === 0) {
-        return { valid: false, reason: 'session_not_found' };
+        return { valid: false, reason: 'session_not_found', linkedAppSessionActive: false };
       }
 
       const item = rows[0];
@@ -709,26 +768,55 @@ const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => 
       const appExpiresAt = getSqlDatetimeMillis(item.app_expires_at);
       const appLastSeenAt = getSqlDatetimeMillis(item.app_last_seen_at) || 0;
 
+      let linkedAppSessionActive = item.app_status === SESSION_STATUS_ACTIVE;
+      if (linkedAppSessionActive && appExpiresAt != null && appExpiresAt <= now) {
+        linkedAppSessionActive = false;
+      }
+      if (linkedAppSessionActive && appLastSeenAt + heartbeatTtlMs() <= now) {
+        linkedAppSessionActive = false;
+      }
+
+      if (item.launch_ticket_status === TICKET_STATUS_REVOKED) {
+        await connection.execute(
+          `
+            UPDATE auth_web_sessions
+            SET session_status = ?, revoked_at = NOW(), revoked_reason = ?, updated_at = NOW()
+            WHERE id = ? AND session_status = ?
+          `,
+          [SESSION_STATUS_REVOKED, 'Enlace temporal revocado', item.web_id, SESSION_STATUS_ACTIVE],
+        );
+        return { valid: false, reason: 'web_session_revoked', linkedAppSessionActive };
+      }
+
       if (item.web_status !== SESSION_STATUS_ACTIVE) {
-        return { valid: false, reason: 'web_session_revoked' };
+        return { valid: false, reason: 'web_session_revoked', linkedAppSessionActive };
       }
       if (item.app_status !== SESSION_STATUS_ACTIVE) {
-        return { valid: false, reason: 'app_session_revoked' };
+        return { valid: false, reason: 'app_session_revoked', linkedAppSessionActive: false };
       }
       if (webExpiresAt != null && webExpiresAt <= now) {
-        return { valid: false, reason: 'web_session_expired' };
+        await connection.execute(
+          `
+            UPDATE auth_web_sessions
+            SET session_status = ?, updated_at = NOW()
+            WHERE id = ? AND session_status = ?
+          `,
+          [SESSION_STATUS_EXPIRED, item.web_id, SESSION_STATUS_ACTIVE],
+        );
+        return { valid: false, reason: 'web_session_expired', linkedAppSessionActive };
       }
       if (appExpiresAt != null && appExpiresAt <= now) {
-        return { valid: false, reason: 'app_session_expired' };
+        return { valid: false, reason: 'app_session_expired', linkedAppSessionActive: false };
       }
       if (appLastSeenAt + heartbeatTtlMs() <= now) {
-        return { valid: false, reason: 'app_session_inactive' };
+        return { valid: false, reason: 'app_session_inactive', linkedAppSessionActive: false };
       }
 
       result = {
         valid: true,
         sessionType: 'web',
         appSessionId: item.app_session_id,
+        linkedAppSessionActive: true,
       };
     } else {
       const [rows] = await connection.execute(
@@ -800,4 +888,6 @@ module.exports = {
   getWebLaunchTicketState,
   buildLaunchUrl,
   getWebAppUrl,
+  resolveWebBridgeSessionExpiry,
+  webBridgeSessionTtlMs,
 };

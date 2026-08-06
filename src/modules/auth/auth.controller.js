@@ -336,8 +336,11 @@ const heartbeatSession = async (req, res) => {
       message: 'Heartbeat registrado',
       data: {
         active: state.valid,
+        reason: state.reason || null,
         sessionType,
-        linkedAppSessionActive: state.valid,
+        linkedAppSessionActive: sessionType === 'web'
+          ? state.linkedAppSessionActive !== false
+          : state.valid,
         bridgeOverview,
       },
     });
@@ -376,7 +379,9 @@ const sessionStatus = async (req, res) => {
         active: state.valid,
         reason: state.reason || null,
         sessionType,
-        linkedAppSessionActive: state.valid,
+        linkedAppSessionActive: sessionType === 'web'
+          ? state.linkedAppSessionActive !== false
+          : state.valid,
         bridgeOverview,
       },
     });
