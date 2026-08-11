@@ -82,6 +82,18 @@ const rejectLegacyToken = (res) => res.status(403).json({
   reason: 'legacy_session_unsupported',
 });
 
+const decodeBearerToken = (authorizationHeader) => {
+  if (!authorizationHeader) return null;
+  return authorizationHeader.startsWith('Bearer ')
+    ? authorizationHeader.slice(7)
+    : authorizationHeader;
+};
+
+const verifyJwtPayload = (bearerToken, { ignoreExpiration = false } = {}) => {
+  const secret = process.env.JWT_SECRET || 'skaler_dev_secret';
+  return jwt.verify(bearerToken, secret, ignoreExpiration ? { ignoreExpiration: true } : undefined);
+};
+
 // Middleware para consultar estado de sesión sin bloquear tokens revocados.
 const verifyTokenForSessionStatus = async (req, res, next) => {
   const token = req.headers['authorization'];
@@ -226,8 +238,45 @@ const verifyModuleAccess = (moduleKey, action = 'read') => {
   };
 };
 
+// Permite JWT expirado para renovar la sesión si sigue activa en base de datos.
+const verifyTokenAllowExpired = async (req, res, next) => {
+  const bearerToken = decodeBearerToken(req.headers['authorization']);
+
+  if (!bearerToken) {
+    return res.status(401).json({
+      success: false,
+      message: 'Token no proporcionado',
+    });
+  }
+
+  try {
+    let decoded;
+    try {
+      decoded = verifyJwtPayload(bearerToken);
+    } catch (err) {
+      if (err.name !== 'TokenExpiredError') {
+        throw err;
+      }
+      decoded = verifyJwtPayload(bearerToken, { ignoreExpiration: true });
+    }
+
+    if (!decoded || !decoded.sid) {
+      return rejectLegacyToken(res);
+    }
+
+    req.user = decoded;
+    return next();
+  } catch (err) {
+    return res.status(403).json({
+      success: false,
+      message: 'Token inválido o expirado',
+    });
+  }
+};
+
 module.exports = {
   verifyToken,
+  verifyTokenAllowExpired,
   verifyTokenForSessionStatus,
   verifyRole,
   verifyModuleAccess,

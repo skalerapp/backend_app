@@ -723,6 +723,30 @@ const touchSession = async ({ jwtSessionId, sessionType }) => {
   }
 };
 
+const extendSessionExpiry = async ({ jwtSessionId, sessionType }) => {
+  await ensureAuthSessionSchema();
+  const tableName = sessionType === 'web' ? 'auth_web_sessions' : 'auth_app_sessions';
+  const ttlMs = sessionType === 'web' ? webSessionTtlMs() : appSessionTtlMs();
+  const expiresAt = addMilliseconds(new Date(), ttlMs);
+  const expiresAtSql = toSqlDatetime(expiresAt);
+  const connection = await pool.getConnection();
+  try {
+    await connection.execute(
+      `
+        UPDATE ${tableName}
+        SET expires_at = ?, last_seen_at = NOW(), updated_at = NOW()
+        WHERE jwt_session_id = ?
+          AND session_status = ?
+      `,
+      [expiresAtSql, jwtSessionId, SESSION_STATUS_ACTIVE],
+    );
+  } finally {
+    connection.release();
+  }
+
+  return expiresAt;
+};
+
 const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => {
   await ensureAuthSessionSchema();
   const connection = await pool.getConnection();
@@ -883,6 +907,7 @@ module.exports = {
   getUserById,
   isUserAccountActive,
   touchSession,
+  extendSessionExpiry,
   getSessionState,
   getAppSessionBridgeOverview,
   getWebLaunchTicketState,

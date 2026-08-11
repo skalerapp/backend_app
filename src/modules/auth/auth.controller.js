@@ -14,6 +14,7 @@ const {
   getAppSessionBridgeOverview,
   getWebLaunchTicketState,
   touchSession,
+  extendSessionExpiry,
   buildLaunchUrl,
   getWebAppUrl,
 } = require('./auth.session.service');
@@ -172,8 +173,14 @@ const login = async (req, res) => {
   }
 };
 
-// Refrescar token
-const refreshToken = async (req, res) => {
+const buildAuthUserPayload = (user) => ({
+  id: user.id,
+  email: user.email,
+  name: user.name,
+  role: user.role,
+});
+
+const refreshSessionToken = async (req, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({
@@ -182,17 +189,55 @@ const refreshToken = async (req, res) => {
       });
     }
 
+    const sessionId = req.user.sid;
+    const sessionType = req.user.session_type === 'web' ? 'web' : 'app';
+    const sessionState = await getSessionState({ jwtSessionId: sessionId, sessionType });
+
+    if (!sessionState.valid) {
+      return res.status(403).json({
+        success: false,
+        message: 'La sesión vinculada ya no está activa',
+        reason: sessionState.reason,
+      });
+    }
+
+    const userAccount = await getUserById(req.user.id);
+    if (!userAccount || !isUserAccountActive(userAccount.status)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tu usuario está inactivo. Contacta al administrador.',
+        reason: 'user_inactive',
+      });
+    }
+
+    const expiresAt = await extendSessionExpiry({ jwtSessionId: sessionId, sessionType });
+    const token = generateToken(userAccount, {
+      sessionId,
+      sessionType,
+      linkedAppSessionId: sessionType === 'web' ? req.user.linked_app_session_id : undefined,
+    });
+
     res.json({
       success: true,
-      message: 'Token refrescado'
+      message: 'Token refrescado',
+      token,
+      session: {
+        type: sessionType,
+        sessionId,
+        expiresAt,
+      },
+      user: buildAuthUserPayload(userAccount),
     });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Error al refrescar token'
+      message: 'Error al refrescar token',
     });
   }
 };
+
+// Compatibilidad con clientes que aún llaman /refresh-token.
+const refreshToken = refreshSessionToken;
 
 // Cerrar sesión
 const logout = async (req, res) => {
@@ -491,6 +536,7 @@ module.exports = {
   register,
   login,
   refreshToken,
+  refreshSessionToken,
   logout,
   createTemporaryWebLaunch,
   consumeTemporaryWebLaunch,

@@ -2,7 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
 const authController = require('./auth.controller');
-const { verifyToken, verifyTokenForSessionStatus } = require('../../middleware/auth.middleware');
+const {
+  verifyToken,
+  verifyTokenAllowExpired,
+  verifyTokenForSessionStatus,
+} = require('../../middleware/auth.middleware');
 
 // Rutas de autenticación con validaciones
 router.post('/register', [
@@ -16,7 +20,8 @@ router.post('/login', [
 	body('password').notEmpty().withMessage('La contraseña es requerida')
 ], authController.login);
 
-router.post('/refresh-token', verifyToken, authController.refreshToken);
+router.post('/refresh-token', verifyTokenAllowExpired, authController.refreshToken);
+router.post('/session/refresh', verifyTokenAllowExpired, authController.refreshSessionToken);
 router.post('/logout', verifyToken, authController.logout);
 router.post('/web-launch-ticket', verifyToken, authController.createTemporaryWebLaunch);
 router.get('/web-launch/:ticket/status', authController.webLaunchTicketStatus);
