@@ -76,11 +76,23 @@ const dbConfig = {
 
 const configurePoolTimezone = (poolInstance) => {
   const timezoneOffset = resolveAppTimezoneOffset();
+  const originalGetConnection = poolInstance.getConnection.bind(poolInstance);
+
+  poolInstance.getConnection = async () => {
+    const connection = await originalGetConnection();
+    await connection.execute('SET time_zone = ?', [timezoneOffset]);
+    return connection;
+  };
+
   const underlyingPool = poolInstance.pool || poolInstance;
   if (typeof underlyingPool.on !== 'function') return;
 
   underlyingPool.on('connection', (connection) => {
-    connection.query(`SET time_zone = '${timezoneOffset}'`);
+    connection.query(`SET time_zone = '${timezoneOffset}'`, (error) => {
+      if (error) {
+        console.warn('No se pudo fijar time_zone en MySQL:', error.message);
+      }
+    });
   });
 };
 
