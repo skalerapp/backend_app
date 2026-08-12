@@ -454,6 +454,25 @@ const createMovement = async (req, res) => {
         );
       }
 
+      const outboundMovementTypes = new Set(['delivery', 'assignment', 'transfer']);
+      if (normalizedMovementType === 'transfer' && isFleetAssetLike(asset)) {
+        const [latestRows] = await connection.execute(
+          `SELECT movement_type
+           FROM warehouse_asset_movements
+           WHERE asset_id = ?
+           ORDER BY id DESC
+           LIMIT 1`,
+          [assetId],
+        );
+        const latestType = (latestRows[0]?.movement_type || '').toString().trim().toLowerCase();
+        if (outboundMovementTypes.has(latestType)) {
+          throw new HttpError(
+            409,
+            'El vehículo ya está asignado a un proyecto. Registra retorno antes de un nuevo movimiento.',
+          );
+        }
+      }
+
       const isFleetMovement = normalizedMovementType === 'transfer' || isFleetAssetLike(asset);
       if (isFleetMovement) {
         const plateSnapshot = (vehicle_plate_snapshot || asset.vehicle_plate || '').toString().trim();

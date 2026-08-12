@@ -51,15 +51,20 @@ const ensureFleetShape = async (connection) => {
   `);
 };
 
+const FLEET_OUTBOUND_MOVEMENT_TYPES = new Set(['delivery', 'assignment', 'transfer']);
+
 const enrichFleetUnitRow = (row, maintenanceCount = 0) => {
   const documentAlerts = buildFleetDocumentAlerts(row);
   const alertSummary = summarizeFleetDocumentAlerts(documentAlerts);
+  const latestType = (row.latest_movement_type || '').toString().trim().toLowerCase();
+  const isDeployed = FLEET_OUTBOUND_MOVEMENT_TYPES.has(latestType);
 
   return {
     ...row,
     document_alerts: documentAlerts,
     alert_summary: alertSummary,
     maintenance_count: Number(maintenanceCount) || 0,
+    deployment_status: isDeployed ? 'deployed' : 'available',
   };
 };
 
@@ -94,8 +99,9 @@ const listFleetUnits = async (connection, { query, city, limit = 200 } = {}) => 
       COALESCE(mv.movement_count, 0) AS movement_count,
       mv.last_movement_date,
       mv.last_movement_at,
-      lp.latest_project_ot_code,
-      lp.latest_project_name,
+      lm.latest_movement_type,
+      lm.latest_project_ot_code,
+      lm.latest_project_name,
       COALESCE(fm.maintenance_count, 0) AS maintenance_count
     FROM warehouse_assets wa
     LEFT JOIN (
@@ -110,17 +116,17 @@ const listFleetUnits = async (connection, { query, city, limit = 200 } = {}) => 
     LEFT JOIN (
       SELECT
         wm.asset_id,
+        wm.movement_type AS latest_movement_type,
         p.ot_code AS latest_project_ot_code,
         p.name AS latest_project_name
       FROM warehouse_asset_movements wm
       INNER JOIN (
         SELECT asset_id, MAX(id) AS latest_id
         FROM warehouse_asset_movements
-        WHERE project_id IS NOT NULL
         GROUP BY asset_id
       ) latest ON latest.latest_id = wm.id
       LEFT JOIN projects p ON p.id = wm.project_id
-    ) lp ON lp.asset_id = wa.id
+    ) lm ON lm.asset_id = wa.id
     LEFT JOIN (
       SELECT asset_id, COUNT(*) AS maintenance_count
       FROM fleet_maintenance_records
@@ -136,8 +142,26 @@ const listFleetUnits = async (connection, { query, city, limit = 200 } = {}) => 
 
 const getFleetUnitById = async (connection, assetId) => {
   const [rows] = await connection.execute(`
-    SELECT wa.*
+    SELECT
+      wa.*,
+      lm.latest_movement_type,
+      lm.latest_project_ot_code,
+      lm.latest_project_name
     FROM warehouse_assets wa
+    LEFT JOIN (
+      SELECT
+        wm.asset_id,
+        wm.movement_type AS latest_movement_type,
+        p.ot_code AS latest_project_ot_code,
+        p.name AS latest_project_name
+      FROM warehouse_asset_movements wm
+      INNER JOIN (
+        SELECT asset_id, MAX(id) AS latest_id
+        FROM warehouse_asset_movements
+        GROUP BY asset_id
+      ) latest ON latest.latest_id = wm.id
+      LEFT JOIN projects p ON p.id = wm.project_id
+    ) lm ON lm.asset_id = wa.id
     WHERE wa.id = ?
     LIMIT 1
   `, [assetId]);
