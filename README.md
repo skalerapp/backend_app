@@ -136,9 +136,13 @@ GET http://localhost:3000/api/health
 | `/api/labor-permissions` | Permisos laborales |
 | `/api/allowances` | Viáticos, solicitudes y gastos |
 | `/api/materials` | Materiales por proyecto |
-| `/api/warehouse` | Almacén / activos |
+| `/api/warehouse` | Almacén de materiales/herramientas (activos, movimientos, retornos) |
+| `/api/fleet` | Control de flota (unidades, alertas documentales, mantenimientos) |
 | `/api/operational-scopes` | Alcances operativos por rol |
 | `/api/commercial` | Comercial V2 (clientes, visitas, embudo, cotizaciones) |
+| `/api/hse` | HSE (capacitaciones, EPP, incidentes, reportes, acciones correctivas) |
+| `/api/tasks` | Tareas operativas por proyecto |
+| `/api/performance-evaluations` | Evaluación de desempeño |
 | `/api/app` | Versión mínima/requerida de la app móvil (`GET /version`, público) |
 | `/api/evidence` | Carga de evidencias |
 | `/api/audit-logs` | Auditoría |
@@ -163,6 +167,20 @@ Releases APK: repo `skalerapp/skaler-app-updates` — ver `documentation/APP_REL
 
 `ensureWarehouseShape` usa `information_schema` para agregar columnas (MySQL 8 no soporta `ADD COLUMN IF NOT EXISTS`). Si ves error 500 en `/api/warehouse/assets`, despliega la versión actual de `warehouse.service.js`.
 
+### Flota — reglas clave
+
+- API dedicada en `/api/fleet/*`; permisos bajo módulo `warehouse`.
+- Unidades de flota (`vehicle`, `machinery`) no admiten `delivery` ni `assignment` de materiales en `/api/warehouse`.
+- `deployment_status`: `deployed` si el último movimiento es traslado/despacho/asignación; `available` tras retorno.
+- Tabla `fleet_maintenance_records` para historial de mantenimientos y actualización de vencimientos documentales.
+- Conexiones MySQL fuerzan `time_zone = '-05:00'` (Colombia) en `src/config/database.js`.
+
+### HSE — reglas clave
+
+- Endpoints bajo `/api/hse/*` con permiso de módulo `hse`.
+- Subrecursos: `trainings`, `epp-deliveries`, `incidents`, `unsafe-reports`, `corrective-actions`.
+- Resumen por proyecto en `GET /api/hse/summary`.
+
 ## Estructura del proyecto
 
 ```
@@ -185,8 +203,12 @@ backend/
 │   │   ├── allowances/
 │   │   ├── materials/
 │   │   ├── warehouse/
+│   │   ├── fleet/
 │   │   ├── operationalScopes/
 │   │   ├── commercial/
+│   │   ├── hse/
+│   │   ├── tasks/
+│   │   ├── performance/
 │   │   ├── evidence/
 │   │   └── audit/
 │   └── utils/                 # Migraciones, seeds, rebuild BD
@@ -347,5 +369,5 @@ npm run migrate:users:roles:v1 -- --apply
 
 ---
 
-**Última actualización:** Junio 2026  
+**Última actualización:** 12 de agosto de 2026  
 **Equipo:** JMS Tech

@@ -819,22 +819,60 @@ const updateCorrectiveAction = async (req, res) => {
   }
 };
 
-const getProjectHseSummary = async (connection, projectId) => {
+const getProjectHseSummary = async (connection, projectId, options = {}) => {
+  return buildHseSummaryCounts(connection, { projectId, ...options });
+};
+
+const tableDateExpression = (tableName) => {
+  switch (tableName) {
+    case 'hse_trainings':
+      return 'COALESCE(training_date, DATE(created_at))';
+    case 'hse_epp_deliveries':
+      return 'COALESCE(delivery_date, DATE(created_at))';
+    case 'hse_incidents':
+      return 'COALESCE(incident_date, DATE(created_at))';
+    case 'hse_unsafe_reports':
+      return 'COALESCE(report_date, DATE(created_at))';
+    default:
+      return 'DATE(created_at)';
+  }
+};
+
+const buildHseSummaryCounts = async (connection, { projectId = null, dateFrom = null, dateTo = null } = {}) => {
   await ensureHseSchema(connection);
 
-  const countOpen = async (table, statusColumn = 'status') => {
-    const [rows] = await connection.execute(
-      `SELECT COUNT(*) AS total FROM ${table} WHERE project_id = ? AND LOWER(TRIM(${statusColumn})) NOT IN ('closed', 'completed', 'resolved')`,
-      [projectId]
-    );
-    return Number(rows[0]?.total || 0);
+  const buildWhere = (tableName, { openOnly = false } = {}) => {
+    const parts = [];
+    const values = [];
+    if (projectId) {
+      parts.push('project_id = ?');
+      values.push(projectId);
+    }
+    const dateExpr = tableDateExpression(tableName);
+    if (dateFrom) {
+      parts.push(`${dateExpr} >= ?`);
+      values.push(dateFrom);
+    }
+    if (dateTo) {
+      parts.push(`${dateExpr} <= ?`);
+      values.push(dateTo);
+    }
+    if (openOnly) {
+      parts.push("LOWER(TRIM(status)) NOT IN ('closed', 'completed', 'resolved')");
+    }
+    const clause = parts.length ? `WHERE ${parts.join(' AND ')}` : '';
+    return { clause, values };
   };
 
   const countAll = async (table) => {
-    const [rows] = await connection.execute(
-      `SELECT COUNT(*) AS total FROM ${table} WHERE project_id = ?`,
-      [projectId]
-    );
+    const { clause, values } = buildWhere(table);
+    const [rows] = await connection.execute(`SELECT COUNT(*) AS total FROM ${table} ${clause}`, values);
+    return Number(rows[0]?.total || 0);
+  };
+
+  const countOpen = async (table) => {
+    const { clause, values } = buildWhere(table, { openOnly: true });
+    const [rows] = await connection.execute(`SELECT COUNT(*) AS total FROM ${table} ${clause}`, values);
     return Number(rows[0]?.total || 0);
   };
 
@@ -853,33 +891,10 @@ const getProjectHseSummary = async (connection, projectId) => {
 const getHseDashboardSummary = async (req, res) => {
   try {
     const projectId = req.query.project_id ? Number(req.query.project_id) : null;
+    const dateFrom = normalizeDateValue(req.query.date_from);
+    const dateTo = normalizeDateValue(req.query.date_to);
     const data = await withDbConnection(async (connection) => {
-      await ensureHseSchema(connection);
-      if (projectId) {
-        return getProjectHseSummary(connection, projectId);
-      }
-
-      const countAll = async (table) => {
-        const [rows] = await connection.execute(`SELECT COUNT(*) AS total FROM ${table}`);
-        return Number(rows[0]?.total || 0);
-      };
-      const countOpen = async (table) => {
-        const [rows] = await connection.execute(
-          `SELECT COUNT(*) AS total FROM ${table} WHERE LOWER(TRIM(status)) NOT IN ('closed', 'completed', 'resolved')`
-        );
-        return Number(rows[0]?.total || 0);
-      };
-
-      return {
-        trainings_total: await countAll('hse_trainings'),
-        epp_deliveries_total: await countAll('hse_epp_deliveries'),
-        incidents_total: await countAll('hse_incidents'),
-        incidents_open: await countOpen('hse_incidents'),
-        unsafe_reports_total: await countAll('hse_unsafe_reports'),
-        unsafe_reports_open: await countOpen('hse_unsafe_reports'),
-        corrective_actions_total: await countAll('hse_corrective_actions'),
-        corrective_actions_pending: await countOpen('hse_corrective_actions'),
-      };
+      return buildHseSummaryCounts(connection, { projectId, dateFrom, dateTo });
     });
 
     res.json({ success: true, data });
