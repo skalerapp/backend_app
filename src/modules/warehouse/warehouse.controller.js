@@ -446,6 +446,14 @@ const createMovement = async (req, res) => {
       }
 
       const asset = assetRows[0];
+      const materialDispatchTypes = new Set(['delivery', 'assignment']);
+      if (materialDispatchTypes.has(normalizedMovementType) && isFleetAssetLike(asset)) {
+        throw new HttpError(
+          409,
+          'Los vehículos y maquinaria móvil se registran desde Control de Flota, no desde despacho de materiales.',
+        );
+      }
+
       const isFleetMovement = normalizedMovementType === 'transfer' || isFleetAssetLike(asset);
       if (isFleetMovement) {
         const plateSnapshot = (vehicle_plate_snapshot || asset.vehicle_plate || '').toString().trim();

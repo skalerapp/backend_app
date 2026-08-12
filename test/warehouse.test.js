@@ -282,6 +282,24 @@ describe('Warehouse endpoints', () => {
     expect(res.body.success).toBe(true);
   });
 
+  it('rejects material dispatch delivery for fleet assets', async () => {
+    const res = await request(app)
+      .post('/api/warehouse/movements')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        asset_id: validFleetAssetId,
+        project_id: projectId,
+        movement_type: 'delivery',
+        movement_date: '2026-04-10',
+        quantity: '1',
+        receiving_signature_name: 'Receptor Campo',
+        receiving_signature_data: JSON.stringify([{ x: 6.1, y: 14.2 }]),
+      });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.message).toMatch(/Control de Flota/i);
+  });
+
   afterAll(async () => {
     await closeDatabase();
   });
