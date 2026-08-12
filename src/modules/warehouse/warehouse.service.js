@@ -183,7 +183,13 @@ const toDateOnly = (value) => {
   return date;
 };
 
-const buildFleetDocumentAlerts = (asset, referenceDate = new Date()) => {
+const FLEET_DOCUMENT_EXPIRY_WARNING_DAYS = 30;
+
+const buildFleetDocumentAlerts = (
+  asset,
+  referenceDate = new Date(),
+  warningDays = FLEET_DOCUMENT_EXPIRY_WARNING_DAYS,
+) => {
   const current = toDateOnly(referenceDate);
   const checks = [
     { key: 'soat', label: 'SOAT', value: asset.soatDueDate ?? asset.soat_due_date },
@@ -193,13 +199,43 @@ const buildFleetDocumentAlerts = (asset, referenceDate = new Date()) => {
 
   return checks.map((item) => {
     const parsed = parseIsoDate(item.value);
+    const daysUntilDue = parsed
+      ? Math.round((parsed.getTime() - current.getTime()) / (1000 * 60 * 60 * 24))
+      : null;
+
     return {
       ...item,
       parsed,
+      dueDate: item.value ?? null,
       missing: !parsed,
       expired: !!parsed && parsed < current,
+      expiringSoon: !!parsed && parsed >= current && daysUntilDue <= warningDays,
+      daysUntilDue,
     };
   });
+};
+
+const summarizeFleetDocumentAlerts = (alerts = []) => {
+  const expired = alerts.filter((item) => item.expired);
+  const expiringSoon = alerts.filter((item) => item.expiringSoon);
+  const missing = alerts.filter((item) => item.missing);
+
+  let severity = 'ok';
+  if (expired.length) {
+    severity = 'expired';
+  } else if (expiringSoon.length) {
+    severity = 'expiring_soon';
+  } else if (missing.length) {
+    severity = 'missing';
+  }
+
+  return {
+    severity,
+    expiredCount: expired.length,
+    expiringSoonCount: expiringSoon.length,
+    missingCount: missing.length,
+    hasIssues: expired.length + expiringSoon.length + missing.length > 0,
+  };
 };
 
 const normalizeWarehouseAssetPayload = (payload) => {
@@ -570,7 +606,9 @@ module.exports = {
   ensureWarehouseShape,
   generateNextAssetCode,
   isFleetAssetLike,
+  FLEET_DOCUMENT_EXPIRY_WARNING_DAYS,
   buildFleetDocumentAlerts,
+  summarizeFleetDocumentAlerts,
   resolveStockDelta,
   applyMovementStockAdjustment,
   normalizeText,
