@@ -127,6 +127,43 @@ describe('Warehouse endpoints', () => {
     });
   });
 
+  it('GET /api/warehouse/assets enriches latest project OT and last movement datetime', async () => {
+    const res = await request(app)
+      .get('/api/warehouse/assets')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.statusCode).toBe(200);
+    const asset = res.body.data.find((item) => item.id === assetId);
+    expect(asset).toBeTruthy();
+    expect(asset.latest_project_ot_code).toMatch(/^OT/i);
+    expect(asset.last_movement_at).toBeTruthy();
+  });
+
+  it('GET /api/warehouse/assets supports search by project OT', async () => {
+    const assetsRes = await request(app)
+      .get('/api/warehouse/assets')
+      .set('Authorization', `Bearer ${authToken}`);
+    const asset = assetsRes.body.data.find((item) => item.id === assetId);
+    const otCode = asset.latest_project_ot_code;
+    expect(otCode).toBeTruthy();
+
+    const searchRes = await request(app)
+      .get(`/api/warehouse/assets?q=${encodeURIComponent(otCode)}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(searchRes.statusCode).toBe(200);
+    expect(searchRes.body.data.some((item) => item.id === assetId)).toBe(true);
+  });
+
+  it('GET /api/warehouse/movements includes project OT code', async () => {
+    const res = await request(app)
+      .get(`/api/warehouse/movements?assetId=${assetId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.some((item) => item.project_ot_code)).toBe(true);
+  });
+
   it('POST /api/warehouse/movements rejects delivery when stock is insufficient', async () => {
     const res = await request(app)
       .post('/api/warehouse/movements')

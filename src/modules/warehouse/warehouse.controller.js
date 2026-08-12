@@ -67,10 +67,20 @@ const listAssets = async (req, res) => {
           wa.brand LIKE ? OR
           wa.model LIKE ? OR
           wa.work_order LIKE ? OR
-          wa.client_name LIKE ?
+          wa.client_name LIKE ? OR
+          EXISTS (
+            SELECT 1
+            FROM warehouse_asset_movements wm_search
+            LEFT JOIN projects p_search ON p_search.id = wm_search.project_id
+            WHERE wm_search.asset_id = wa.id
+              AND (
+                p_search.ot_code LIKE ? OR
+                p_search.name LIKE ?
+              )
+          )
         )`);
         const queryLike = `%${q.toString().trim()}%`;
-        params.push(queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike);
+        params.push(queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike, queryLike);
       }
 
       if ((city || '').toString().trim().isNotEmpty) {
@@ -90,16 +100,34 @@ const listAssets = async (req, res) => {
         SELECT
           wa.*,
           COALESCE(mv.movement_count, 0) AS movement_count,
-          mv.last_movement_date
+          mv.last_movement_date,
+          mv.last_movement_at,
+          lp.latest_project_ot_code,
+          lp.latest_project_name
         FROM warehouse_assets wa
         LEFT JOIN (
           SELECT
             asset_id,
             COUNT(*) AS movement_count,
-            MAX(movement_date) AS last_movement_date
+            MAX(movement_date) AS last_movement_date,
+            MAX(created_at) AS last_movement_at
           FROM warehouse_asset_movements
           GROUP BY asset_id
         ) mv ON mv.asset_id = wa.id
+        LEFT JOIN (
+          SELECT
+            wm.asset_id,
+            p.ot_code AS latest_project_ot_code,
+            p.name AS latest_project_name
+          FROM warehouse_asset_movements wm
+          INNER JOIN (
+            SELECT asset_id, MAX(id) AS latest_id
+            FROM warehouse_asset_movements
+            WHERE project_id IS NOT NULL
+            GROUP BY asset_id
+          ) latest ON latest.latest_id = wm.id
+          LEFT JOIN projects p ON p.id = wm.project_id
+        ) lp ON lp.asset_id = wa.id
         ${where}
         ORDER BY wa.updated_at DESC, wa.id DESC
         LIMIT ${normalizedLimit}
@@ -315,6 +343,7 @@ const listMovements = async (req, res) => {
            wa.asset_code,
            wa.asset_name,
            p.name AS project_name,
+           p.ot_code AS project_ot_code,
            responsible.name AS responsible_name,
            receiver.name AS receiver_name
          FROM warehouse_asset_movements wm
