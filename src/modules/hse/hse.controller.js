@@ -13,6 +13,32 @@ const normalizeDateValue = (value) => {
   return text || null;
 };
 
+const assertHseCollaboratorSelection = async (connection, { project_id, employee_id }) => {
+  if (!employee_id) {
+    return;
+  }
+
+  const [assignmentRows] = await connection.execute(
+    'SELECT project_id FROM project_collaborators WHERE employee_id = ? LIMIT 1',
+    [employee_id]
+  );
+  const assignedProjectId = assignmentRows[0]?.project_id ?? null;
+
+  if (project_id) {
+    if (!assignedProjectId || Number(assignedProjectId) !== Number(project_id)) {
+      throw new HttpError(400, 'El colaborador no está asignado al proyecto seleccionado');
+    }
+    return;
+  }
+
+  if (assignedProjectId) {
+    throw new HttpError(
+      400,
+      'El colaborador seleccionado está asignado a un proyecto. Elige ese proyecto o selecciona personal sin asignación.'
+    );
+  }
+};
+
 const tableHasColumn = async (connection, tableName, columnName) => {
   const [rows] = await connection.query(
     `SELECT 1
@@ -410,6 +436,7 @@ const createTraining = async (req, res) => {
     const row = await withDbConnection(async (connection) => {
       await ensureHseSchema(connection);
       await applyAuditContext(connection, req);
+      await assertHseCollaboratorSelection(connection, { project_id, employee_id });
       const [result] = await connection.execute(
         `INSERT INTO hse_trainings
          (project_id, employee_id, training_type, title, training_date, instructor_name, evidence_path, notes, status, created_by)
@@ -483,6 +510,8 @@ const createEppDelivery = async (req, res) => {
           throw new HttpError(400, 'delivery_date es requerido');
         }
 
+        await assertHseCollaboratorSelection(connection, { project_id, employee_id });
+
         const batchId = crypto.randomUUID();
         const createdRows = [];
 
@@ -534,6 +563,7 @@ const createEppDelivery = async (req, res) => {
     const row = await withDbConnection(async (connection) => {
       await ensureHseSchema(connection);
       await applyAuditContext(connection, req);
+      await assertHseCollaboratorSelection(connection, { project_id, employee_id });
       const [result] = await connection.execute(
         `INSERT INTO hse_epp_deliveries
          (project_id, employee_id, epp_item, epp_item_code, delivery_batch_id, quantity, delivery_date, evidence_path, notes, delivered_by_user_id)
@@ -612,6 +642,7 @@ const createIncident = async (req, res) => {
     const row = await withDbConnection(async (connection) => {
       await ensureHseSchema(connection);
       await applyAuditContext(connection, req);
+      await assertHseCollaboratorSelection(connection, { project_id, employee_id });
       const [result] = await connection.execute(
         `INSERT INTO hse_incidents
          (project_id, employee_id, incident_type, severity, incident_date, description, evidence_path, status, created_by)

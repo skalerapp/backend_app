@@ -76,7 +76,8 @@ const getEmployees = async (req, res) => {
         e.employee_name AS name,
         u.name AS app_user_name,
         u.email AS app_user_email,
-        u.email AS email
+        u.email AS email,
+        pc.id AS collaborator_assignment_id
       FROM employees e
       LEFT JOIN users u ON e.user_id = u.id
       LEFT JOIN project_collaborators pc ON pc.employee_id = e.id
