@@ -188,6 +188,37 @@ const normalizeProbability = (value, stage = 'lead') => {
   return parsed;
 };
 
+const parseDashboardDateParam = (value) => {
+  const text = (value ?? '').toString().trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  return null;
+};
+
+const buildDateRangeFilter = (columnExpression, dateFrom, dateTo) => {
+  const parts = [];
+  const params = [];
+  if (dateFrom) {
+    parts.push(`${columnExpression} >= ?`);
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    parts.push(`${columnExpression} <= ?`);
+    params.push(dateTo);
+  }
+  if (parts.length === 0) return null;
+  return { clause: parts.join(' AND '), params };
+};
+
+const appendDateRangeToScope = (scope, columnExpression, dateFrom, dateTo) => {
+  const dateFilter = buildDateRangeFilter(columnExpression, dateFrom, dateTo);
+  if (!dateFilter) return scope;
+  if (!scope?.clause) return dateFilter;
+  return {
+    clause: `${scope.clause} AND ${dateFilter.clause}`,
+    params: [...scope.params, ...dateFilter.params],
+  };
+};
+
 const normalizeDate = (value) => {
   if (value === null || value === undefined) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
@@ -1767,9 +1798,27 @@ const getCommercialSummary = async (req, res) => {
     await ensureCommercialVisitsTable(connection);
     await ensureCommercialOpportunitiesTable(connection);
 
-    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
-    const opportunityScope = buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co');
-    const quotationScope = buildQuotationOwnerFilter(req.user?.role, req.user?.id, 'cq');
+    const dateFrom = parseDashboardDateParam(req.query.date_from);
+    const dateTo = parseDashboardDateParam(req.query.date_to);
+
+    const visitScope = appendDateRangeToScope(
+      buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv'),
+      'cv.visit_date',
+      dateFrom,
+      dateTo,
+    );
+    const opportunityScope = appendDateRangeToScope(
+      buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co'),
+      'DATE(co.updated_at)',
+      dateFrom,
+      dateTo,
+    );
+    const quotationScope = appendDateRangeToScope(
+      buildQuotationOwnerFilter(req.user?.role, req.user?.id, 'cq'),
+      'DATE(cq.created_at)',
+      dateFrom,
+      dateTo,
+    );
 
     const visitWhere = appendSqlFilter('', visitScope);
     const opportunityWhere = appendSqlFilter('', opportunityScope);
@@ -1846,9 +1895,27 @@ const getCommercialBoard = async (req, res) => {
     connection = await pool.getConnection();
     await ensureCommercialSchema(connection);
 
-    const visitScope = buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv');
-    const opportunityScope = buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co');
-    const quotationScope = buildQuotationOwnerFilter(req.user?.role, req.user?.id, 'cq');
+    const dateFrom = parseDashboardDateParam(req.query.date_from);
+    const dateTo = parseDashboardDateParam(req.query.date_to);
+
+    const visitScope = appendDateRangeToScope(
+      buildVisitOwnerFilter(req.user?.role, req.user?.id, 'cv'),
+      'cv.visit_date',
+      dateFrom,
+      dateTo,
+    );
+    const opportunityScope = appendDateRangeToScope(
+      buildOpportunityOwnerFilter(req.user?.role, req.user?.id, 'co'),
+      'DATE(co.updated_at)',
+      dateFrom,
+      dateTo,
+    );
+    const quotationScope = appendDateRangeToScope(
+      buildQuotationOwnerFilter(req.user?.role, req.user?.id, 'cq'),
+      'DATE(cq.created_at)',
+      dateFrom,
+      dateTo,
+    );
     const projectScope = buildCommercialProjectVisibilityFilter(req.user?.role, req.user?.id, 'p');
 
     const visitWhere = appendSqlFilter('', visitScope);
@@ -1989,6 +2056,11 @@ const getCommercialBoard = async (req, res) => {
 
     let geoAudit = [];
     if (canViewInternalLocation(req.user?.role)) {
+      const visitGeoDateFilter = buildDateRangeFilter('DATE(vl.recorded_at)', dateFrom, dateTo);
+      const quotationGeoDateFilter = buildDateRangeFilter('DATE(ql.recorded_at)', dateFrom, dateTo);
+      const visitGeoWhere = visitGeoDateFilter ? `WHERE ${visitGeoDateFilter.clause}` : '';
+      const quotationGeoWhere = quotationGeoDateFilter ? `WHERE ${quotationGeoDateFilter.clause}` : '';
+
       const [visitGeoRows] = await connection.execute(
         `SELECT
            cv.id AS visit_id,
@@ -2003,8 +2075,10 @@ const getCommercialBoard = async (req, res) => {
          FROM visit_locations vl
          INNER JOIN commercial_visits cv ON cv.id = vl.visit_id
          LEFT JOIN projects p ON p.id = cv.project_id
+         ${visitGeoWhere}
          ORDER BY vl.recorded_at DESC
          LIMIT 8`,
+        visitGeoDateFilter?.params ?? [],
       );
       const [quotationGeoRows] = await connection.execute(
         `SELECT
@@ -2019,8 +2093,10 @@ const getCommercialBoard = async (req, res) => {
          FROM quotation_locations ql
          INNER JOIN commercial_quotations cq ON cq.id = ql.quotation_id
          LEFT JOIN projects p ON p.id = cq.project_id
+         ${quotationGeoWhere}
          ORDER BY ql.recorded_at DESC
          LIMIT 8`,
+        quotationGeoDateFilter?.params ?? [],
       );
       geoAudit = [...visitGeoRows, ...quotationGeoRows]
         .sort((left, right) => new Date(right.recorded_at).getTime() - new Date(left.recorded_at).getTime())
