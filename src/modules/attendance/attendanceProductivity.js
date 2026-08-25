@@ -1,10 +1,7 @@
+const { parseSqlDatetimeInAppTimezone } = require('../../utils/datetime.utils');
 const { resolveWorkdayProfile } = require('./attendanceWorkday');
 
-const parseDateTime = (value) => {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-};
+const parseDateTime = (value) => parseSqlDatetimeInAppTimezone(value);
 
 const hoursBetween = (start, end) => {
   if (!start || !end || end <= start) return 0;
@@ -197,7 +194,7 @@ const computeAttendanceProductivity = async (connection, attendanceRow, events =
     roleValue: attendanceRow.app_user_role,
     events,
     checkIn: attendanceRow.check_in,
-    checkOut: new Date(),
+    checkOut: attendanceRow.check_out || new Date(),
     activityHours: metrics.activityHours,
     completedActivities: metrics.completedActivities,
     completedTasks: metrics.completedTasks,

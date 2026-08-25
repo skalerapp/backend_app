@@ -51,6 +51,20 @@ describe('attendanceProductivity', () => {
     expect(result.unproductive_reason).toMatch(/sin actividades/i);
   });
 
+  test('administrative profile uses Bogota SQL datetimes for reference hours', () => {
+    const hours = computeReferenceHours({
+      profile: 'lunch_break_only',
+      checkIn: '2026-08-21 06:07:43',
+      checkOut: '2026-08-21 18:05:28',
+      events: [
+        { event_type: 'lunch_start', recorded_at: '2026-08-21 18:05:08' },
+        { event_type: 'lunch_end', recorded_at: '2026-08-21 18:05:11' },
+      ],
+    });
+
+    expect(hours).toBeCloseTo(11.96, 1);
+  });
+
   test('administrative profile uses full shift minus lunch as reference', () => {
     const result = computeProductivityFromMetrics({
       roleValue: 'administrative',
