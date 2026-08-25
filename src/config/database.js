@@ -126,8 +126,18 @@ async function testConnection() {
 }
 
 // ✅ función para cerrar DB (IMPORTANTE PARA JEST)
+let poolClosed = false;
+
 async function closeDatabase() {
-  await pool.end();
+  if (poolClosed) return;
+  poolClosed = true;
+  try {
+    await pool.end();
+  } catch (error) {
+    if (!/closed/i.test(error?.message || '')) {
+      throw error;
+    }
+  }
   console.log('🛑 Pool de MySQL cerrado');
 }
 

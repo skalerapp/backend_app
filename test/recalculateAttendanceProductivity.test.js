@@ -1,4 +1,4 @@
-const { parseArgs } = require('../src/utils/recalculateAttendanceProductivity');
+const { parseArgs, formatError } = require('../src/utils/recalculateAttendanceProductivity');
 
 describe('recalculateAttendanceProductivity args', () => {
   const originalArgv = process.argv;
@@ -32,5 +32,11 @@ describe('recalculateAttendanceProductivity args', () => {
     expect(options.attendanceId).toBe(42);
     expect(options.dateFrom).toBe('2026-08-01');
     expect(options.dateTo).toBe('2026-08-31');
+  });
+
+  it('formats connection refused with actionable guidance', () => {
+    const message = formatError({ code: 'ECONNREFUSED' });
+    expect(message).toMatch(/ECONNREFUSED/i);
+    expect(message).toMatch(/\.env\.client\.sync/i);
   });
 });

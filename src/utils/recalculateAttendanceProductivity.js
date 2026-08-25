@@ -1,4 +1,37 @@
-require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+
+const bootstrapEnv = () => {
+  const args = process.argv.slice(2);
+  const envFileIndex = args.indexOf('--env-file');
+  const backendRoot = path.join(__dirname, '..', '..');
+
+  if (envFileIndex >= 0 && args[envFileIndex + 1]) {
+    const envPath = path.resolve(args[envFileIndex + 1]);
+    if (!fs.existsSync(envPath)) {
+      throw new Error(`No se encontró el archivo de entorno: ${envPath}`);
+    }
+    require('dotenv').config({ path: envPath, override: true });
+    console.log(`Usando entorno: ${envPath}`);
+    return;
+  }
+
+  if (args.includes('--client') || args.includes('--production')) {
+    const clientEnvPath = path.join(backendRoot, '.env.client.sync');
+    if (!fs.existsSync(clientEnvPath)) {
+      throw new Error(
+        'No se encontró .env.client.sync. Copia backend/.env.client.sync.example, pega DATABASE_URL de Railway y vuelve a ejecutar con --client.',
+      );
+    }
+    require('dotenv').config({ path: clientEnvPath, override: true });
+    console.log('Usando credenciales de .env.client.sync (BD cliente/producción)');
+    return;
+  }
+
+  require('dotenv').config({ path: path.join(backendRoot, '.env') });
+};
+
+bootstrapEnv();
 
 const { withDbConnection, closeDatabase } = require('../config/database');
 const {
@@ -34,6 +67,28 @@ const parseArgs = () => {
     dateFrom: fromIndex >= 0 ? args[fromIndex + 1] : null,
     dateTo: toIndex >= 0 ? args[toIndex + 1] : null,
   };
+};
+
+const formatError = (error) => {
+  if (!error) return 'Error desconocido';
+
+  if (error.code === 'ECONNREFUSED') {
+    return [
+      'No se pudo conectar a MySQL (ECONNREFUSED).',
+      'Local: enciende MySQL o revisa backend/.env.',
+      'Producción cliente: ejecuta con --client y configura backend/.env.client.sync con DATABASE_URL de Railway.',
+    ].join(' ');
+  }
+
+  if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+    return 'Acceso denegado a MySQL. Revisa usuario/contraseña en el archivo .env.';
+  }
+
+  if (Array.isArray(error.errors) && error.errors.length > 0) {
+    return error.errors.map((item) => item.message || item.code).filter(Boolean).join(' | ');
+  }
+
+  return error.message || error.code || String(error);
 };
 
 const buildQuery = ({ attendanceId, dateFrom, dateTo }) => {
@@ -174,7 +229,7 @@ const run = async () => {
 if (require.main === module) {
   run()
     .catch((error) => {
-      console.error('❌ Error recalculando productividad:', error.message);
+      console.error(`❌ Error recalculando productividad: ${formatError(error)}`);
       process.exitCode = 1;
     })
     .finally(async () => {
@@ -185,4 +240,6 @@ if (require.main === module) {
 module.exports = {
   recalculateAttendanceProductivity,
   parseArgs,
+  formatError,
+  bootstrapEnv,
 };
