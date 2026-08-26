@@ -701,6 +701,10 @@ const approveQuotation = async (req, res) => {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Cotización ya aprobada' });
     }
+    if (quotation.status === 'rechazado') {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'No se puede aprobar una cotización rechazada' });
+    }
 
     await connection.execute(
       'UPDATE commercial_quotations SET status = ?, approved_value = ?, approval_date = NOW(), updated_at = NOW() WHERE id = ?',
@@ -733,6 +737,78 @@ const approveQuotation = async (req, res) => {
     console.error('approveQuotation error:', error);
     try { await connection?.rollback(); } catch (_) {}
     res.status(500).json({ success: false, message: 'Error al aprobar cotización', error: error.message });
+  } finally {
+    connection?.release();
+  }
+};
+
+const rejectQuotation = async (req, res) => {
+  let connection;
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ success: false, message: 'Id invalido' });
+    const payload = req.body || {};
+    const rejectionReason = payload.rejection_reason?.toString().trim();
+    if (!rejectionReason) {
+      return res.status(400).json({ success: false, message: 'Debes indicar el motivo del rechazo' });
+    }
+
+    if (!canViewInternalLocation(req.user?.role)) {
+      return res.status(403).json({ success: false, message: 'No autorizado para rechazar cotizaciones' });
+    }
+
+    connection = await pool.getConnection();
+    await ensureCommercialSchema(connection);
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute(
+      'SELECT * FROM commercial_quotations WHERE id = ? LIMIT 1 FOR UPDATE',
+      [id],
+    );
+    if (!rows.length) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    }
+
+    const quotation = rows[0];
+    if (quotation.status === 'aprobado') {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'No se puede rechazar una cotización ya aprobada' });
+    }
+    if (quotation.status === 'rechazado') {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'La cotización ya fue rechazada' });
+    }
+
+    await connection.execute(
+      `UPDATE commercial_quotations
+       SET status = 'rechazado',
+           rejection_reason = ?,
+           rejected_at = NOW(),
+           approved_value = NULL,
+           approval_date = NULL,
+           updated_at = NOW()
+       WHERE id = ?`,
+      [rejectionReason, id],
+    );
+
+    await applyAuditContext(connection, req);
+    await connection.commit();
+
+    const [updatedRows] = await connection.execute(`
+      SELECT cq.*, ot.ot_code
+      FROM commercial_quotations cq
+      LEFT JOIN orders_ot ot ON ot.id = (
+        SELECT MAX(id) FROM orders_ot WHERE quotation_id = cq.id
+      )
+      WHERE cq.id = ?
+      LIMIT 1
+    `, [id]);
+    res.json({ success: true, message: 'Cotización rechazada', data: mapQuotationRow(updatedRows[0]) });
+  } catch (error) {
+    console.error('rejectQuotation error:', error);
+    try { await connection?.rollback(); } catch (_) {}
+    res.status(500).json({ success: false, message: 'Error al rechazar cotización', error: error.message });
   } finally {
     connection?.release();
   }
@@ -1420,6 +1496,8 @@ const ensureQuotationsTable = async (connection) => {
       INDEX idx_project_id (project_id)
     )
   `);
+  await ensureColumn(connection, 'commercial_quotations', 'rejection_reason', 'TEXT NULL');
+  await ensureColumn(connection, 'commercial_quotations', 'rejected_at', 'DATETIME NULL');
 };
 
 const ensureOrdersOtTable = async (connection) => {
@@ -3050,5 +3128,6 @@ module.exports = {
   listQuotations,
   getQuotationById,
   approveQuotation,
+  rejectQuotation,
   ensureCommercialSchema,
 };

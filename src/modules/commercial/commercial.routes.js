@@ -24,5 +24,6 @@ router.post('/quotations', verifyToken, verifyModuleAccess('commercial', 'create
 router.get('/quotations', verifyToken, verifyModuleAccess('commercial', 'read'), commercialController.listQuotations);
 router.get('/quotations/:id', verifyToken, verifyModuleAccess('commercial', 'read'), commercialController.getQuotationById);
 router.patch('/quotations/:id/approve', verifyToken, verifyModuleAccess('commercial', 'update'), commercialController.approveQuotation);
+router.patch('/quotations/:id/reject', verifyToken, verifyModuleAccess('commercial', 'update'), commercialController.rejectQuotation);
 
 module.exports = router;
