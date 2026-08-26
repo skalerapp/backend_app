@@ -37,7 +37,7 @@ const ensureTasksSchema = async (connection) => {
   await connection.execute(`
     CREATE TABLE IF NOT EXISTS operational_tasks (
       id INT AUTO_INCREMENT PRIMARY KEY,
-      project_id INT NOT NULL,
+      project_id INT NULL,
       employee_id INT NULL,
       title VARCHAR(200) NOT NULL,
       description TEXT NULL,
@@ -54,6 +54,10 @@ const ensureTasksSchema = async (connection) => {
       INDEX idx_due_date (due_date)
     )
   `);
+
+  try {
+    await connection.execute('ALTER TABLE operational_tasks MODIFY COLUMN project_id INT NULL');
+  } catch (error) {}
 };
 
 const assertTaskAccess = async (connection, req, taskRow) => {
@@ -69,7 +73,7 @@ const assertTaskAccess = async (connection, req, taskRow) => {
     return;
   }
 
-  if (normalizedRole === 'employee') {
+  if (normalizedRole === 'employee' || normalizedRole === 'operational_employee') {
     const [rows] = await connection.execute(
       'SELECT id FROM employees WHERE user_id = ? AND id = ? LIMIT 1',
       [req.user.id, taskRow.employee_id]
@@ -78,6 +82,13 @@ const assertTaskAccess = async (connection, req, taskRow) => {
       throw new HttpError(403, 'No tienes acceso a esta tarea');
     }
     return;
+  }
+
+  if (taskRow.project_id == null) {
+    if (Number(taskRow.created_by) === Number(req.user?.id)) {
+      return;
+    }
+    throw new HttpError(403, 'No tienes acceso a esta tarea');
   }
 
   const hasAccess = await canAccessProjectByOperationalScope({
@@ -113,7 +124,7 @@ const listTasks = async (req, res) => {
       });
 
       if (visibility.clause) {
-        conditions.push(visibility.clause);
+        conditions.push(`(t.project_id IS NULL OR (${visibility.clause}))`);
         params.push(...visibility.params);
       }
 
@@ -135,7 +146,7 @@ const listTasks = async (req, res) => {
         `SELECT t.*, p.name AS project_name, p.ot_code,
                 COALESCE(u.name, e.employee_name, CONCAT('Colaborador #', e.id)) AS employee_name
          FROM operational_tasks t
-         INNER JOIN projects p ON p.id = t.project_id
+         LEFT JOIN projects p ON p.id = t.project_id
          LEFT JOIN employees e ON e.id = t.employee_id
          LEFT JOIN users u ON u.id = e.user_id
          ${where}
@@ -164,8 +175,13 @@ const listTasks = async (req, res) => {
 const createTask = async (req, res) => {
   try {
     const { project_id, employee_id, title, description, due_date, priority, status } = req.body;
-    if (!project_id || !title) {
-      throw new HttpError(400, 'project_id y title son requeridos');
+    if (!title || !title.toString().trim()) {
+      throw new HttpError(400, 'title es requerido');
+    }
+
+    const resolvedProjectId = project_id == null || project_id === '' ? null : Number(project_id);
+    if (resolvedProjectId != null && Number.isNaN(resolvedProjectId)) {
+      throw new HttpError(400, 'project_id inválido');
     }
 
     const row = await withDbConnection(async (connection) => {
@@ -173,12 +189,12 @@ const createTask = async (req, res) => {
       await ensureOperationalScopeShape(connection);
 
       const normalizedRole = normalizeRole(req.user?.role);
-      if (['leader', 'supervisor'].includes(normalizedRole)) {
+      if (resolvedProjectId != null && ['leader', 'supervisor'].includes(normalizedRole)) {
         const hasAccess = await canAccessProjectByOperationalScope({
           connection,
           userId: req.user.id,
           role: normalizedRole,
-          projectId: Number(project_id),
+          projectId: resolvedProjectId,
         });
         if (!hasAccess) {
           throw new HttpError(403, 'No tienes acceso operativo a este proyecto');
@@ -191,7 +207,7 @@ const createTask = async (req, res) => {
          (project_id, employee_id, title, description, due_date, priority, status, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          project_id,
+          resolvedProjectId,
           employee_id || null,
           title.toString().trim(),
           description || null,
