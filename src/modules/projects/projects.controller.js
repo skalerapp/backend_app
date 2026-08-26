@@ -11,6 +11,10 @@ const {
 } = require('../operationalScopes/operationalScopes.service');
 const { ensureHseSchema, getProjectHseSummary } = require('../hse/hse.controller');
 const { ensureTasksSchema } = require('../tasks/tasks.controller');
+const {
+  normalizeOtCodeInput,
+  resolveNextOtCode,
+} = require('./projectOtCode');
 
 const normalizeProjectStatus = (value) => {
   const raw = (value || '').toString().trim().toLowerCase();
@@ -40,6 +44,32 @@ const normalizeProjectStatus = (value) => {
 };
 
 const otCodeFromProjectId = (projectId) => `OT${projectId}`;
+
+const assertUniqueOtCode = async (connection, otCode, excludeProjectId = null) => {
+  const params = [otCode];
+  let query = 'SELECT id FROM projects WHERE ot_code = ?';
+  if (excludeProjectId != null) {
+    query += ' AND id <> ?';
+    params.push(excludeProjectId);
+  }
+  query += ' LIMIT 1';
+
+  const [existingRows] = await connection.execute(query, params);
+  if (existingRows.length > 0) {
+    throw new HttpError(409, `La OT ${otCode} ya está asignada a otro proyecto`);
+  }
+};
+
+const resolveProjectOtCode = async (connection, requestedOtCode) => {
+  const normalizedRequested = normalizeOtCodeInput(requestedOtCode);
+  if (requestedOtCode != null && String(requestedOtCode).trim() !== '' && !normalizedRequested) {
+    throw new HttpError(400, 'Formato de OT inválido. Use OT seguido de números, por ejemplo OT1534.');
+  }
+
+  const otCode = normalizedRequested || await resolveNextOtCode(connection);
+  await assertUniqueOtCode(connection, otCode);
+  return otCode;
+};
 const todayIsoDate = () => new Date().toISOString().slice(0, 10);
 const isFinalStatus = (status) => ['completed', 'closed'].includes(status);
 
@@ -146,13 +176,12 @@ const ensureProjectsSchema = async (connection) => {
 
 const getNextOtCode = async (req, res) => {
   try {
-    const nextId = await withDbConnection(async (connection) => {
+    const nextOtCode = await withDbConnection(async (connection) => {
       await ensureProjectOtSchema(connection);
-      const [statusRows] = await connection.execute("SHOW TABLE STATUS LIKE 'projects'");
-      return Number(statusRows?.[0]?.Auto_increment || 0);
+      return resolveNextOtCode(connection);
     });
 
-    if (!nextId || Number.isNaN(nextId)) {
+    if (!nextOtCode) {
       return res.status(500).json({
         success: false,
         message: 'No fue posible calcular la próxima OT',
@@ -162,8 +191,7 @@ const getNextOtCode = async (req, res) => {
     res.json({
       success: true,
       data: {
-        nextProjectId: nextId,
-        otCode: otCodeFromProjectId(nextId),
+        otCode: nextOtCode,
       },
     });
   } catch (error) {
@@ -268,7 +296,7 @@ const getProjectById = async (req, res) => {
 // Crear nuevo proyecto
 const createProject = async (req, res) => {
   try {
-    const { name, description, budget, start_date, end_date, actual_end_date, manager_id, status, planned_area_m2, planned_length_ml } = req.body;
+    const { name, description, budget, start_date, end_date, actual_end_date, manager_id, status, planned_area_m2, planned_length_ml, ot_code } = req.body;
 
     if (!name || !budget) {
       return res.status(400).json({
@@ -306,7 +334,7 @@ const createProject = async (req, res) => {
         [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, manager_id || null, normalizedStatus, resolvedPlannedArea, resolvedPlannedLength]
       );
 
-      const generatedOtCode = otCodeFromProjectId(insertResult.insertId);
+      const generatedOtCode = await resolveProjectOtCode(connection, ot_code);
       await connection.execute('UPDATE projects SET ot_code = ? WHERE id = ?', [generatedOtCode, insertResult.insertId]);
 
       return {
@@ -330,7 +358,7 @@ const createProject = async (req, res) => {
 const updateProject = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, budget, start_date, end_date, actual_end_date, status, manager_id, planned_area_m2, planned_length_ml } = req.body;
+    const { name, description, budget, start_date, end_date, actual_end_date, status, manager_id, planned_area_m2, planned_length_ml, ot_code } = req.body;
 
     if (!name || !budget) {
       return res.status(400).json({
@@ -393,11 +421,30 @@ const updateProject = async (req, res) => {
         resolvedPlannedLength = isNaN(parsed) ? 0 : Math.max(0, parsed);
       }
 
+      let resolvedOtCode;
+      if (ot_code !== undefined) {
+        const normalizedOtCode = normalizeOtCodeInput(ot_code);
+        if (String(ot_code || '').trim() !== '' && !normalizedOtCode) {
+          throw new HttpError(400, 'Formato de OT inválido. Use OT seguido de números, por ejemplo OT1534.');
+        }
+        if (normalizedOtCode) {
+          await assertUniqueOtCode(connection, normalizedOtCode, id);
+          resolvedOtCode = normalizedOtCode;
+        }
+      }
+
       await applyAuditContext(connection, req);
-      await connection.execute(
-        'UPDATE projects SET name = ?, description = ?, budget = ?, start_date = ?, end_date = ?, actual_end_date = ?, status = ?, manager_id = ?, planned_area_m2 = ?, planned_length_ml = ?, updated_at = NOW() WHERE id = ?',
-        [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, normalizedStatus, manager_id || null, resolvedPlannedArea, resolvedPlannedLength, id]
-      );
+      if (resolvedOtCode) {
+        await connection.execute(
+          'UPDATE projects SET name = ?, description = ?, budget = ?, start_date = ?, end_date = ?, actual_end_date = ?, status = ?, manager_id = ?, planned_area_m2 = ?, planned_length_ml = ?, ot_code = ?, updated_at = NOW() WHERE id = ?',
+          [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, normalizedStatus, manager_id || null, resolvedPlannedArea, resolvedPlannedLength, resolvedOtCode, id]
+        );
+      } else {
+        await connection.execute(
+          'UPDATE projects SET name = ?, description = ?, budget = ?, start_date = ?, end_date = ?, actual_end_date = ?, status = ?, manager_id = ?, planned_area_m2 = ?, planned_length_ml = ?, updated_at = NOW() WHERE id = ?',
+          [name, description || null, budget, start_date || null, end_date || null, resolvedActualEndDate, normalizedStatus, manager_id || null, resolvedPlannedArea, resolvedPlannedLength, id]
+        );
+      }
     });
 
     res.json({
