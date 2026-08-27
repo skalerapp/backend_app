@@ -39,7 +39,7 @@ const normalizeRequestedRole = (roleValue) => {
     case 'employee':
     case 'empleado':
     case 'colaborador':
-      return 'employee';
+      return 'operational_employee';
     case 'operational_employee':
     case 'operational':
     case 'operativo':
@@ -111,7 +111,7 @@ const runUsersRoleSchemaMigration = async (providedConnection) => {
       await connection.execute(`
         UPDATE users
         SET role = CASE
-          WHEN role IS NULL OR TRIM(role) = '' THEN 'employee'
+          WHEN role IS NULL OR TRIM(role) = '' THEN 'operational_employee'
           WHEN LOWER(TRIM(role)) IN ('admin', 'super_admin', 'superadmin') THEN 'super_admin'
           WHEN LOWER(TRIM(role)) IN ('administrativo', 'administrative') THEN 'administrative'
           WHEN LOWER(TRIM(role)) IN (
@@ -126,7 +126,7 @@ const runUsersRoleSchemaMigration = async (providedConnection) => {
             'coordinator_operations'
           ) THEN 'manager'
           WHEN LOWER(TRIM(role)) IN ('lider', 'leader') THEN 'leader'
-          WHEN LOWER(TRIM(role)) IN ('empleado', 'colaborador') THEN 'employee'
+          WHEN LOWER(TRIM(role)) IN ('empleado', 'colaborador', 'employee') THEN 'operational_employee'
           WHEN LOWER(TRIM(role)) IN (
             'almacen',
             'bodega',
@@ -143,6 +143,14 @@ const runUsersRoleSchemaMigration = async (providedConnection) => {
           WHEN LOWER(TRIM(role)) IN ('hse', 'salud_ocupacional', 'seguridad_industrial', 'health_safety', 'health_and_safety') THEN 'hse'
           ELSE LOWER(TRIM(role))
         END
+      `);
+    } catch (e) {}
+
+    try {
+      await connection.execute(`
+        UPDATE users
+        SET role = 'operational_employee'
+        WHERE LOWER(TRIM(role)) = 'employee'
       `);
     } catch (e) {}
   } finally {
@@ -194,7 +202,7 @@ const createUser = async (req, res) => {
     const { email, password, name, role } = req.body;
     const normalizedEmail = (email || '').toString().trim().toLowerCase();
     const normalizedName = (name || '').toString().trim();
-    const normalizedRole = normalizeRequestedRole(role || 'employee');
+    const normalizedRole = normalizeRequestedRole(role || 'operational_employee');
     const requesterRole = normalizeRequestedRole(req.user?.role || '');
 
     if (!normalizedEmail || !normalizedName || !password) {
@@ -217,7 +225,6 @@ const createUser = async (req, res) => {
       'coordinator_operations',
       'supervisor',
       'leader',
-      'employee',
       'operational_employee',
       'warehouse_logistics',
       'commercial',
@@ -301,7 +308,7 @@ const updateUser = async (req, res) => {
 
     const normalizedEmail = (email || '').toString().trim().toLowerCase();
     const normalizedName = (name || '').toString().trim();
-    const normalizedRole = normalizeRequestedRole(role || 'employee');
+    const normalizedRole = normalizeRequestedRole(role || 'operational_employee');
     const requesterRole = normalizeRequestedRole(req.user?.role || '');
     const storageRole = roleToStorageValue(normalizedRole);
     const normalizedStatus = (status || 'active').toString().trim().toLowerCase();
@@ -327,7 +334,6 @@ const updateUser = async (req, res) => {
       'coordinator_operations',
       'supervisor',
       'leader',
-      'employee',
       'operational_employee',
       'warehouse_logistics',
       'commercial',

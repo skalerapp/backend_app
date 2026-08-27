@@ -11,7 +11,6 @@ const OPERATIONAL_TASK_ASSIGNEE_ROLES = new Set([
   'leader',
   'supervisor',
   'operational_employee',
-  'employee',
 ]);
 
 const normalizeIdentification = (value) => {

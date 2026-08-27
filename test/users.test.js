@@ -68,7 +68,7 @@ describe('Users endpoints', () => {
     expect(res.statusCode).toBe(201);
     expect(res.body.success).toBe(true);
     expect(res.body.data).toHaveProperty('id');
-    expect(res.body.data.role).toBe('employee');
+    expect(res.body.data.role).toBe('operational_employee');
     createdUserId = res.body.data.id;
   });
 
