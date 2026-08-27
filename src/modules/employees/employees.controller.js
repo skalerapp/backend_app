@@ -7,6 +7,13 @@ const {
   buildOperationalVisibilityFilter,
 } = require('../operationalScopes/operationalScopes.service');
 
+const OPERATIONAL_TASK_ASSIGNEE_ROLES = new Set([
+  'leader',
+  'supervisor',
+  'operational_employee',
+  'employee',
+]);
+
 const normalizeIdentification = (value) => {
   if (value === undefined || value === null) return '';
   return value.toString().replace(/[^0-9A-Za-z]/g, '').toUpperCase();
@@ -310,6 +317,55 @@ const deleteEmployee = async (req, res) => {
   }
 };
 
+const getOperationalTaskAssignees = async (req, res) => {
+  let connection;
+  try {
+    await ensureEmployeeSchema();
+    connection = await pool.getConnection();
+
+    const [employees] = await connection.execute(
+      `SELECT
+        e.*,
+        e.employee_name AS name,
+        u.name AS app_user_name,
+        u.email AS app_user_email,
+        u.email AS email,
+        u.role AS app_user_role
+      FROM employees e
+      LEFT JOIN users u ON e.user_id = u.id
+      WHERE LOWER(TRIM(COALESCE(e.status, 'active'))) = 'active'
+      ORDER BY e.employee_name ASC, e.id ASC`,
+    );
+
+    const data = employees.filter((row) => {
+      const normalizedRole = normalizeRole(row.app_user_role);
+      if (OPERATIONAL_TASK_ASSIGNEE_ROLES.has(normalizedRole)) {
+        return true;
+      }
+
+      if (!row.user_id) {
+        const position = (row.position || '').toString().toLowerCase();
+        return /supervisor|lider|operario|operativ|tecnico|auxiliar|oficial/.test(position);
+      }
+
+      return false;
+    });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('getOperationalTaskAssignees error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener responsables operativos',
+      error: error.message,
+    });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+};
+
 const getLinkableAppUsers = async (req, res) => {
   let connection;
   try {
@@ -359,6 +415,7 @@ const getLinkableAppUsers = async (req, res) => {
 module.exports = {
   getEmployees,
   getMyEmployee,
+  getOperationalTaskAssignees,
   getEmployeeById,
   getLinkableAppUsers,
   createEmployee,
