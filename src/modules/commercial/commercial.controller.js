@@ -2610,9 +2610,16 @@ const listCommercialClients = async (req, res) => {
     const filters = [];
     const params = [];
     if (search) {
-      filters.push('(business_name LIKE ? OR nit LIKE ? OR city LIKE ? OR contact_name LIKE ?)');
       const like = `%${search}%`;
-      params.push(like, like, like, like);
+      if (search.length < 3) {
+        filters.push('(business_name LIKE ? OR nit LIKE ?)');
+        params.push(like, like);
+      } else {
+        filters.push(
+          '(business_name LIKE ? OR nit LIKE ? OR city LIKE ? OR contact_name LIKE ? OR contact_phone LIKE ?)',
+        );
+        params.push(like, like, like, like, like);
+      }
     }
 
     const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';

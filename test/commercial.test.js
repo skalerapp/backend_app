@@ -431,6 +431,33 @@ describe('Commercial endpoints', () => {
     ).toBe(true);
   });
 
+  it('GET /api/commercial/clients short query ignores city-only matches', async () => {
+    const uniqueSuffix = Date.now();
+
+    await request(app)
+      .post('/api/commercial/clients')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        client_type: 'juridica',
+        nit: `903${uniqueSuffix}`,
+        business_name: `Cliente Gachancipa ${uniqueSuffix}`,
+        city: 'Gachancipa',
+        billing_email: 'facturacion@gachancipa.com',
+        contact_name: 'Contacto Gachancipa',
+        contact_phone: '3005551213',
+      })
+      .expect(201);
+
+    const searchRes = await request(app)
+      .get('/api/commercial/clients?q=pa')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(searchRes.statusCode).toBe(200);
+    expect(
+      searchRes.body.data.some((client) => client.business_name === `Cliente Gachancipa ${uniqueSuffix}`),
+    ).toBe(false);
+  });
+
   it('POST /api/commercial/quotations creates a new quotation tied to a project', async () => {
     const res = await request(app)
       .post('/api/commercial/quotations')
