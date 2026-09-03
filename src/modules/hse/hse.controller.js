@@ -902,7 +902,14 @@ const buildHseSummaryCounts = async (connection, { projectId = null, dateFrom = 
   };
 
   const countOpen = async (table) => {
-    const { clause, values } = buildWhere(table, { openOnly: true });
+    const parts = [];
+    const values = [];
+    if (projectId) {
+      parts.push('project_id = ?');
+      values.push(projectId);
+    }
+    parts.push("LOWER(TRIM(status)) NOT IN ('closed', 'completed', 'resolved')");
+    const clause = parts.length ? `WHERE ${parts.join(' AND ')}` : '';
     const [rows] = await connection.execute(`SELECT COUNT(*) AS total FROM ${table} ${clause}`, values);
     return Number(rows[0]?.total || 0);
   };
