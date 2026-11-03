@@ -1,6 +1,10 @@
-const CURRENT_TERMS_VERSION = '2.0';
+const trimEnv = (key) => (process.env[key] || '').trim();
 
-const TERMS_TITLE = 'Términos y condiciones de uso — SKALER';
+const envOrDefault = (key, fallback) => trimEnv(key) || fallback;
+
+const CURRENT_TERMS_VERSION = envOrDefault('APP_TERMS_VERSION', '1.0');
+
+const TERMS_TITLE = 'Términos y condiciones de uso — Skaler App';
 
 /** Valores por defecto SKALER S.A.S. (fuente: skaler.com.co, RUES). Sobrescribibles por env. */
 const SKALER_COMPANY_DEFAULTS = {
@@ -13,9 +17,15 @@ const SKALER_COMPANY_DEFAULTS = {
   phone: '(+57) 602 447 3636',
 };
 
-const trimEnv = (key) => (process.env[key] || '').trim();
-
-const envOrDefault = (key, fallback) => trimEnv(key) || fallback;
+const isValidPublicHttpUrl = (value) => {
+  if (!value) return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+};
 
 const getCompanyLegalContext = () => {
   const legalName = envOrDefault('APP_TERMS_COMPANY_LEGAL_NAME', SKALER_COMPANY_DEFAULTS.legalName);
@@ -57,14 +67,14 @@ const buildTermsSections = () => {
       id: 'controller',
       title: '1. Responsable y objeto',
       body:
-        `SKALER es una plataforma corporativa operada por ${legalName} (en adelante, «SKALER» o «la Empresa»), identificada con ${identityLine}. Domicilio principal: ${address}. ` +
+        `Skaler App es una plataforma corporativa operada por ${legalName} (en adelante, «Skaler App» o «la Empresa»), identificada con ${identityLine}. Domicilio principal: ${address}. ` +
         'La plataforma apoya la gestión de obra, personal, logística, comercial, HSE y procesos internos. Al iniciar sesión, usted declara haber leído y aceptado estos términos y autoriza el tratamiento de datos descrito aquí, en el marco de su relación laboral o contractual con la Empresa y de la normativa colombiana aplicable (incluida la Ley 1581 de 2012 y normas complementarias sobre protección de datos personales).',
     },
     {
       id: 'authorized_use',
       title: '2. Uso autorizado y dispositivos',
       body:
-        'El acceso es personal, intransferible y solo para fines laborales autorizados. Puede usar la aplicación móvil (Android) o el acceso web en navegador (por ejemplo en iPhone/iPad). Si utiliza un dispositivo personal, lo hace bajo su responsabilidad: debe mantener bloqueo de pantalla, sistema actualizado, antivirus razonable y no compartir credenciales. La Empresa puede suspender cuentas por uso indebido, fraude o incumplimiento de políticas internas.',
+        'El acceso es personal, intransferible y solo para fines laborales autorizados. Puede usar la aplicación móvil Skaler App (Android) o el acceso web en navegador (por ejemplo en iPhone/iPad). Si utiliza un dispositivo personal, lo hace bajo su responsabilidad: debe mantener bloqueo de pantalla, sistema actualizado, antivirus razonable y no compartir credenciales. La Empresa puede suspender cuentas por uso indebido, fraude o incumplimiento de políticas internas.',
     },
     {
       id: 'account',
@@ -76,7 +86,7 @@ const buildTermsSections = () => {
       id: 'device_permissions',
       title: '4. Permisos y funciones en su dispositivo',
       body:
-        'Para operar, SKALER puede solicitar y utilizar las siguientes capacidades, según el módulo y su rol:\n\n' +
+        'Para operar, Skaler App puede solicitar y utilizar las siguientes capacidades, según el módulo y su rol:\n\n' +
         '• Red e internet: enviar y recibir datos con los servidores de la Empresa (sincronización, login, reportes).\n' +
         '• Ubicación (GPS): registrar georreferencia en procesos como asistencia o controles en sitio, cuando la función esté activa.\n' +
         '• Cámara y galería: capturar o adjuntar evidencias fotográficas (asistencia, obra, HSE, logística, etc.).\n' +
@@ -101,13 +111,13 @@ const buildTermsSections = () => {
       id: 'monitoring',
       title: '7. Trazabilidad, auditoría y comunicaciones',
       body:
-        'Los registros generados en SKALER (fecha, hora, usuario, acciones relevantes, evidencias y, cuando aplique, ubicación) pueden ser consultados por personal autorizado de la Empresa para control operativo, investigación de incidentes y cumplimiento normativo. La aceptación de estos términos queda registrada en el sistema con versión del documento, fecha, datos de usuario y referencias técnicas de acceso.',
+        'Los registros generados en Skaler App (fecha, hora, usuario, acciones relevantes, evidencias y, cuando aplique, ubicación) pueden ser consultados por personal autorizado de la Empresa para control operativo, investigación de incidentes y cumplimiento normativo. La aceptación de estos términos queda registrada en el sistema con versión del documento, fecha, datos de usuario y referencias técnicas de acceso.',
     },
     {
       id: 'confidentiality',
       title: '8. Confidencialidad y propiedad',
       body:
-        'La información operativa, comercial y de clientes visible en SKALER es confidencial de la Empresa. Queda prohibido copiar, divulgar o usar esa información fuera de sus funciones autorizadas, salvo obligación legal o instrucción expresa de la Empresa.',
+        'La información operativa, comercial y de clientes visible en Skaler App es confidencial de la Empresa. Queda prohibido copiar, divulgar o usar esa información fuera de sus funciones autorizadas, salvo obligación legal o instrucción expresa de la Empresa.',
     },
     {
       id: 'acceptance',
@@ -120,7 +130,13 @@ const buildTermsSections = () => {
 
 const getTermsDocumentUrl = () => {
   const raw = trimEnv('APP_TERMS_DOCUMENT_URL');
-  return raw || null;
+  if (isValidPublicHttpUrl(raw)) return raw;
+
+  const webBase = envOrDefault(
+    'WEB_APP_URL',
+    envOrDefault('FRONTEND_URL', 'https://skalerapp-web.web.app'),
+  );
+  return `${webBase.replace(/\/+$/, '')}/terms/terminos-skaler-app-v1.html`;
 };
 
 const getCurrentTermsPayload = () => {
@@ -129,7 +145,7 @@ const getCurrentTermsPayload = () => {
     version: CURRENT_TERMS_VERSION,
     title: TERMS_TITLE,
     sections: buildTermsSections(),
-    effectiveLabel: `Versión ${CURRENT_TERMS_VERSION} — ${ctx.legalName} · NIT ${ctx.nit}`,
+    effectiveLabel: `Versión ${CURRENT_TERMS_VERSION} — Skaler App · ${ctx.legalName} · NIT ${ctx.nit}`,
     documentUrl: getTermsDocumentUrl(),
     company: {
       legalName: ctx.legalName,
@@ -151,4 +167,5 @@ module.exports = {
   getCompanyLegalContext,
   getTermsDocumentUrl,
   getCurrentTermsPayload,
+  isValidPublicHttpUrl,
 };

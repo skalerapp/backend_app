@@ -5,9 +5,11 @@ const {
 
 describe('appTerms config', () => {
   it('exposes current version and sections', () => {
-    expect(CURRENT_TERMS_VERSION).toBe('2.0');
+    expect(CURRENT_TERMS_VERSION).toBe('1.0');
     const payload = getCurrentTermsPayload();
-    expect(payload.version).toBe('2.0');
+    expect(payload.version).toBe('1.0');
+    expect(payload.documentUrl).toMatch(/^https:\/\//);
+    expect(payload.title).toMatch(/Skaler App/i);
     expect(Array.isArray(payload.sections)).toBe(true);
     expect(payload.sections.length).toBeGreaterThan(0);
     expect(payload.company?.legalName).toMatch(/SKALER/i);
