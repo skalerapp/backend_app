@@ -6,6 +6,7 @@ const {
   verifyToken,
   verifyTokenAllowExpired,
   verifyTokenForSessionStatus,
+  verifyModuleAccess,
 } = require('../../middleware/auth.middleware');
 
 // Rutas de autenticación con validaciones
@@ -14,6 +15,32 @@ router.post('/register', [
 	body('password').isLength({ min: 6 }).withMessage('La contraseña debe tener al menos 6 caracteres'),
 	body('name').notEmpty().withMessage('El nombre es requerido')
 ], authController.register);
+
+router.get('/terms/current', authController.getCurrentTerms);
+router.get(
+  '/terms/acceptances',
+  verifyToken,
+  verifyModuleAccess('users', 'read'),
+  authController.listAcceptedTerms
+);
+router.get(
+  '/terms/acceptances/export.csv',
+  verifyToken,
+  verifyModuleAccess('users', 'read'),
+  authController.exportAcceptedTermsCsv
+);
+router.get(
+  '/login-events',
+  verifyToken,
+  verifyModuleAccess('users', 'read'),
+  authController.listLoginEventsHandler
+);
+router.get(
+  '/login-events/export.csv',
+  verifyToken,
+  verifyModuleAccess('users', 'read'),
+  authController.exportLoginEventsCsv
+);
 
 router.post('/login', [
 	body('email').notEmpty().withMessage('Email o usuario es requerido'),

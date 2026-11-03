@@ -127,7 +127,7 @@ GET http://localhost:3000/api/health
 
 | Prefijo | Módulo |
 |---------|--------|
-| `/api/auth` | Autenticación, sesiones web |
+| `/api/auth` | Autenticación, sesiones web, términos, registro de accesos |
 | `/api/users` | Usuarios y roles |
 | `/api/employees` | Empleados |
 | `/api/projects` | Proyectos |
@@ -146,6 +146,25 @@ GET http://localhost:3000/api/health
 | `/api/app` | Versión mínima/requerida de la app móvil (`GET /version`, público) |
 | `/api/evidence` | Carga de evidencias |
 | `/api/audit-logs` | Auditoría |
+
+### Auth — términos, login web y seguridad
+
+- `GET /api/auth/terms/current` — texto activo (versión en `src/config/appTerms.js`, actual **2.0**).
+- Login exige `acceptTerms` la primera vez por versión; tabla `user_terms_acceptances`.
+- Admin: `GET /api/auth/terms/acceptances`, export CSV.
+- Login web standalone: variables `APP_WEB_PASSWORD_LOGIN_ENABLED`, `WEB_STANDALONE_*`, bloqueo `AUTH_LOGIN_MAX_*`.
+- Eventos: `auth_login_events` (pantalla Flutter **Registro de accesos**).
+
+Variables empresa (defaults SKALER S.A.S. en código):
+
+```env
+APP_TERMS_COMPANY_LEGAL_NAME=SKALER S.A.S.
+APP_TERMS_COMPANY_NIT=900.225.517-7
+APP_TERMS_PRIVACY_CONTACT_EMAIL=comercialymarketing@skaler.com.co
+APP_TERMS_DOCUMENT_URL=   # PDF público opcional
+```
+
+Documentación: [documentation/APP_TERMS_AND_CONDITIONS.md](../documentation/APP_TERMS_AND_CONDITIONS.md).
 
 ### Comercial — reglas clave
 
@@ -166,6 +185,8 @@ Releases APK: repo `skalerapp/skaler-app-updates` — ver `documentation/APP_REL
 ### Almacén — migración MySQL
 
 `ensureWarehouseShape` usa `information_schema` para agregar columnas (MySQL 8 no soporta `ADD COLUMN IF NOT EXISTS`). Si ves error 500 en `/api/warehouse/assets`, despliega la versión actual de `warehouse.service.js`.
+
+Export de inventario (bodega vs proyectos) se calcula en Flutter a partir de activos + movimientos; ver [documentation/APP_FLOW_WAREHOUSE_LOGISTICS.md](../documentation/APP_FLOW_WAREHOUSE_LOGISTICS.md).
 
 ### Flota — reglas clave
 
@@ -369,5 +390,5 @@ npm run migrate:users:roles:v1 -- --apply
 
 ---
 
-**Última actualización:** 12 de agosto de 2026  
+**Última actualización:** 3 de noviembre de 2026  
 **Equipo:** JMS Tech

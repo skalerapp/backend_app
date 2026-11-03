@@ -21,7 +21,12 @@ describe('Auth endpoints', () => {
   it('POST /api/auth/login with valid credentials should return token', async () => {
     const res = await request(app)
       .post('/api/auth/login')
-      .send({ email: 'admin@skaler.com', password: 'admin123' });
+      .send({
+        email: 'admin@skaler.com',
+        password: 'admin123',
+        acceptTerms: true,
+        termsVersion: '1.0',
+      });
     expect([200,201]).toContain(res.statusCode);
     if (res.statusCode === 200) {
       expect(res.body).toHaveProperty('token');

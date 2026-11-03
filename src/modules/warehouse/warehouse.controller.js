@@ -16,6 +16,15 @@ const {
   upsertWarehouseAsset,
   updateWarehouseAssetById,
 } = require('./warehouse.service');
+const {
+  listDeliveryNotes,
+  fetchDeliveryNoteById,
+  createDeliveryNote,
+  updateDeliveryNote,
+  addDeliveryNoteLine,
+  markDeliveryNoteDelivered,
+  cancelDeliveryNote,
+} = require('./warehouse.delivery-notes.service');
 
 const DISPATCH_RECEIVER_ROLES = new Set([
   'operational_employee',
@@ -589,6 +598,151 @@ const createMovement = async (req, res) => {
   }
 };
 
+const listRemisiones = async (req, res) => {
+  try {
+    const { projectId, status, limit } = req.query;
+    const rows = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      return listDeliveryNotes(connection, {
+        projectId: projectId ? Number(projectId) : null,
+        status,
+        limit,
+      });
+    });
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al listar remisiones');
+  }
+};
+
+const getRemision = async (req, res) => {
+  try {
+    const noteId = Number(req.params.id);
+    if (!Number.isFinite(noteId) || noteId <= 0) {
+      return res.status(400).json({ success: false, message: 'ID de remisión inválido' });
+    }
+    const row = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      return fetchDeliveryNoteById(connection, noteId);
+    });
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Remisión no encontrada' });
+    }
+    res.json({ success: true, data: row });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al consultar remisión');
+  }
+};
+
+const createRemision = async (req, res) => {
+  try {
+    const data = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      await applyAuditContext(connection, req);
+      await connection.beginTransaction();
+      try {
+        const created = await createDeliveryNote(connection, req, req.body || {});
+        await connection.commit();
+        return created;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
+    });
+    res.status(201).json({ success: true, message: 'Remisión registrada', data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al crear remisión');
+  }
+};
+
+const patchRemision = async (req, res) => {
+  try {
+    const noteId = Number(req.params.id);
+    const data = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      await applyAuditContext(connection, req);
+      await connection.beginTransaction();
+      try {
+        const updated = await updateDeliveryNote(connection, req, noteId, req.body || {});
+        await connection.commit();
+        return updated;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
+    });
+    res.json({ success: true, message: 'Remisión actualizada', data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al actualizar remisión');
+  }
+};
+
+const addRemisionLine = async (req, res) => {
+  try {
+    const noteId = Number(req.params.id);
+    const data = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      await applyAuditContext(connection, req);
+      await connection.beginTransaction();
+      try {
+        const updated = await addDeliveryNoteLine(connection, req, noteId, req.body || {});
+        await connection.commit();
+        return updated;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
+    });
+    res.json({ success: true, message: 'Producto agregado a la remisión', data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al agregar producto a la remisión');
+  }
+};
+
+const deliverRemision = async (req, res) => {
+  try {
+    const noteId = Number(req.params.id);
+    const data = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      await applyAuditContext(connection, req);
+      await connection.beginTransaction();
+      try {
+        const updated = await markDeliveryNoteDelivered(connection, req, noteId);
+        await connection.commit();
+        return updated;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
+    });
+    res.json({ success: true, message: 'Remisión marcada como entregada', data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al cerrar remisión');
+  }
+};
+
+const cancelRemision = async (req, res) => {
+  try {
+    const noteId = Number(req.params.id);
+    const data = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      await applyAuditContext(connection, req);
+      await connection.beginTransaction();
+      try {
+        const updated = await cancelDeliveryNote(connection, req, noteId, req.body || {});
+        await connection.commit();
+        return updated;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
+    });
+    res.json({ success: true, message: 'Remisión cancelada', data });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al cancelar remisión');
+  }
+};
+
 module.exports = {
   listAssets,
   listDispatchReceivers,
@@ -597,4 +751,11 @@ module.exports = {
   importAssets,
   listMovements,
   createMovement,
+  listRemisiones,
+  getRemision,
+  createRemision,
+  patchRemision,
+  addRemisionLine,
+  deliverRemision,
+  cancelRemision,
 };

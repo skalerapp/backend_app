@@ -5,7 +5,12 @@ const { closeDatabase } = require('../src/config/database');
 const loginAsAdmin = async () => {
   const res = await request(app)
     .post('/api/auth/login')
-    .send({ email: 'admin@skaler.com', password: 'admin123' });
+    .send({
+      email: 'admin@skaler.com',
+      password: 'admin123',
+      acceptTerms: true,
+      termsVersion: '1.0',
+    });
 
   expect(res.statusCode).toBe(200);
   expect(res.body.token).toBeTruthy();

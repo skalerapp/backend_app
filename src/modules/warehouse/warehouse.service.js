@@ -442,6 +442,9 @@ const ensureWarehouseShape = async (connection) => {
   await addColumnIfMissing(connection, 'warehouse_asset_movements', 'checklist_snapshot', 'TEXT NULL AFTER fuel_level_snapshot');
   await addColumnIfMissing(connection, 'warehouse_asset_movements', 'intake_origin', "VARCHAR(40) NOT NULL DEFAULT 'purchase' AFTER checklist_snapshot");
   await addColumnIfMissing(connection, 'warehouse_asset_movements', 'intake_origin_project_id', 'INT NULL AFTER intake_origin');
+
+  const { ensureDeliveryNotesSchema } = require('./warehouse.delivery-notes.service');
+  await ensureDeliveryNotesSchema(connection);
 };
 
 const upsertWarehouseAsset = async (connection, asset) => {

@@ -2,10 +2,29 @@ const { pool } = require('../../config/database');
 const { withConnection } = require('../../utils/withConnection');
 const { hashPassword, comparePassword, generateToken } = require('../../utils/auth.utils');
 const { validationResult } = require('express-validator');
+const { getCurrentTermsPayload, CURRENT_TERMS_VERSION } = require('../../config/appTerms');
+const {
+  ensureUserTermsSchema,
+  hasUserAcceptedTerms,
+  recordTermsAcceptance,
+  listTermsAcceptances,
+  listAllTermsAcceptancesForExport,
+} = require('./auth.terms.service');
+const {
+  ensureLoginSecuritySchema,
+  recordLoginEvent,
+  getLockState,
+  registerFailedAttempt,
+  clearLockout,
+  listLoginEvents,
+  isWebPasswordLoginEnabled,
+  isWebClientRequest,
+} = require('./auth.login.security.service');
 const {
   ensureAuthSessionSchema,
   isUserAccountActive,
   createAppSession,
+  webStandaloneSessionTtlMs,
   createWebLaunchTicket,
   consumeWebLaunchTicket,
   revokeAppSessionByJwtSessionId,
@@ -73,15 +92,15 @@ const register = async (req, res) => {
 const login = async (req, res) => {
   try {
     await ensureAuthSessionSchema();
+    await ensureLoginSecuritySchema();
 
     const clientPlatform = (req.headers['x-skaler-client'] || '').toString().trim().toLowerCase();
-    const origin = (req.headers.origin || req.headers.referer || '').toString().toLowerCase();
-    const devLoginRequested = (req.headers['x-skaler-dev-login'] || '').toString().trim().toLowerCase() === 'true';
-    const allowDevWebLogin = process.env.NODE_ENV !== 'production' && devLoginRequested;
-    if ((clientPlatform === 'web' || origin.includes(':8080')) && !allowDevWebLogin) {
+    const isWebClient = isWebClientRequest(req);
+    if (isWebClient && !isWebPasswordLoginEnabled()) {
       return res.status(403).json({
         success: false,
-        message: 'El acceso web solo funciona con un enlace temporal generado desde la app móvil.',
+        reason: 'web_password_login_disabled',
+        message: 'El inicio de sesión web con contraseña está deshabilitado.',
       });
     }
 
@@ -100,6 +119,22 @@ const login = async (req, res) => {
       });
     }
 
+    const lockState = await getLockState(identifier);
+    if (lockState.locked) {
+      await recordLoginEvent({
+        identifier,
+        outcome: 'locked',
+        message: 'Intento bloqueado por exceso de fallos',
+        req,
+      });
+      return res.status(429).json({
+        success: false,
+        reason: 'login_locked',
+        message: `Demasiados intentos fallidos. Espera ${Math.ceil(lockState.retryAfterSeconds / 60)} minuto(s) e inténtalo de nuevo.`,
+        retryAfterSeconds: lockState.retryAfterSeconds,
+      });
+    }
+
     const users = await withConnection(pool, async (connection) => {
       const [rows] = await connection.execute(
         `SELECT *
@@ -112,9 +147,24 @@ const login = async (req, res) => {
     });
 
     if (users.length === 0) {
+      const failure = await registerFailedAttempt(identifier);
+      await recordLoginEvent({
+        identifier,
+        outcome: 'failed_unknown_user',
+        message: 'Usuario no encontrado',
+        req,
+      });
+      if (failure.locked) {
+        return res.status(429).json({
+          success: false,
+          reason: 'login_locked',
+          message: `Demasiados intentos fallidos. Espera ${Math.ceil(failure.retryAfterSeconds / 60)} minuto(s) e inténtalo de nuevo.`,
+          retryAfterSeconds: failure.retryAfterSeconds,
+        });
+      }
       return res.status(401).json({
         success: false,
-        message: 'Credenciales inválidas'
+        message: 'Credenciales inválidas',
       });
     }
 
@@ -122,13 +172,36 @@ const login = async (req, res) => {
     const passwordValid = await comparePassword(password, user.password);
 
     if (!passwordValid) {
+      const failure = await registerFailedAttempt(identifier);
+      await recordLoginEvent({
+        userId: user.id,
+        identifier,
+        outcome: 'failed_password',
+        message: 'Contraseña incorrecta',
+        req,
+      });
+      if (failure.locked) {
+        return res.status(429).json({
+          success: false,
+          reason: 'login_locked',
+          message: `Demasiados intentos fallidos. Espera ${Math.ceil(failure.retryAfterSeconds / 60)} minuto(s) e inténtalo de nuevo.`,
+          retryAfterSeconds: failure.retryAfterSeconds,
+        });
+      }
       return res.status(401).json({
         success: false,
-        message: 'Credenciales inválidas'
+        message: 'Credenciales inválidas',
       });
     }
 
     if (!isUserAccountActive(user.status)) {
+      await recordLoginEvent({
+        userId: user.id,
+        identifier,
+        outcome: 'inactive_user',
+        message: 'Usuario inactivo',
+        req,
+      });
       return res.status(403).json({
         success: false,
         message: 'Tu usuario está inactivo. Contacta al administrador.',
@@ -136,13 +209,64 @@ const login = async (req, res) => {
       });
     }
 
+    await clearLockout(identifier);
+
+    await ensureUserTermsSchema();
+    const requestedTermsVersion = (req.body.termsVersion || CURRENT_TERMS_VERSION).toString().trim();
+    const termsVersion = requestedTermsVersion || CURRENT_TERMS_VERSION;
+    const existingAcceptance = await hasUserAcceptedTerms(user.id, termsVersion);
+    const acceptTermsRequested =
+      req.body.acceptTerms === true ||
+      req.body.acceptTerms === 1 ||
+      req.body.acceptTerms === 'true' ||
+      req.body.acceptTerms === '1';
+
+    if (!existingAcceptance && !acceptTermsRequested) {
+      await recordLoginEvent({
+        userId: user.id,
+        identifier,
+        outcome: 'terms_required',
+        message: 'Faltó aceptar términos',
+        req,
+      });
+      return res.status(403).json({
+        success: false,
+        reason: 'terms_required',
+        message: 'Debes aceptar los términos y condiciones para continuar.',
+        terms: getCurrentTermsPayload(),
+      });
+    }
+
+    let termsAcceptanceRecorded = existingAcceptance;
+    if (!existingAcceptance && acceptTermsRequested) {
+      termsAcceptanceRecorded = await recordTermsAcceptance({
+        user,
+        req,
+        termsVersion,
+      });
+    }
+
+    const webStandalone = isWebClient && clientPlatform === 'web';
+    const deviceLabel = webStandalone
+      ? 'web-browser-standalone'
+      : (req.headers['x-device-label'] || req.headers['x-skaler-device'] || 'mobile-app');
     const appSession = await createAppSession({
       user,
-      deviceLabel: req.headers['x-device-label'] || 'mobile-app',
+      deviceLabel,
+      ttlMs: webStandalone ? webStandaloneSessionTtlMs() : null,
     });
     const token = generateToken(user, {
       sessionId: appSession.jwtSessionId,
       sessionType: 'app',
+      expiresIn: webStandalone ? process.env.WEB_STANDALONE_SESSION_EXPIRE || '8h' : undefined,
+    });
+
+    await recordLoginEvent({
+      userId: user.id,
+      identifier,
+      outcome: 'success',
+      message: webStandalone ? 'Inicio web standalone' : 'Inicio app móvil',
+      req,
     });
     const bridgeOverview = await getAppSessionBridgeOverview({ appSessionId: appSession.appSessionId || appSession.id || null });
 
@@ -160,6 +284,11 @@ const login = async (req, res) => {
         email: user.email,
         name: user.name,
         role: user.role
+      },
+      terms: {
+        accepted: true,
+        version: termsVersion,
+        acceptedAt: termsAcceptanceRecorded?.accepted_at || termsAcceptanceRecorded?.acceptedAt || null,
       },
       bridgeOverview,
     });
@@ -532,9 +661,196 @@ const previewWebLaunch = async (req, res) => {
   return res.redirect(302, launchUrl);
 };
 
+const getCurrentTerms = async (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: getCurrentTermsPayload(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'No fue posible cargar los términos y condiciones',
+      error: error?.message || String(error),
+    });
+  }
+};
+
+const listAcceptedTerms = async (req, res) => {
+  try {
+    const result = await listTermsAcceptances({
+      page: req.query.page,
+      pageSize: req.query.pageSize,
+      search: req.query.search,
+      termsVersion: req.query.termsVersion,
+    });
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error listando términos aceptados:', error && error.stack ? error.stack : error);
+    res.status(500).json({
+      success: false,
+      message: 'No fue posible consultar las aceptaciones de términos',
+      error: error?.message || String(error),
+    });
+  }
+};
+
+const listLoginEventsHandler = async (req, res) => {
+  try {
+    const result = await listLoginEvents({
+      page: req.query.page,
+      pageSize: req.query.pageSize,
+      search: req.query.search,
+      outcome: req.query.outcome,
+    });
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'No fue posible consultar el registro de accesos',
+      error: error?.message || String(error),
+    });
+  }
+};
+
+const exportLoginEventsCsv = async (req, res) => {
+  try {
+    const result = await listLoginEvents({
+      page: 1,
+      pageSize: 10000,
+      search: req.query.search,
+      outcome: req.query.outcome,
+    });
+    const rows = result.items || [];
+    const headers = [
+      'Fecha',
+      'Resultado',
+      'Identificador',
+      'Usuario ID',
+      'Mensaje',
+      'Plataforma',
+      'IP',
+    ];
+    const escapeCsv = (value) => {
+      const text = value == null ? '' : String(value);
+      if (/[",;\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+      return text;
+    };
+    const lines = [headers.map(escapeCsv).join(';')];
+    for (const row of rows) {
+      lines.push(
+        [
+          row.created_at,
+          row.outcome,
+          row.identifier,
+          row.user_id,
+          row.message,
+          row.client_platform,
+          row.ip_address,
+        ]
+          .map(escapeCsv)
+          .join(';')
+      );
+    }
+    const csv = `\uFEFF${lines.join('\n')}`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="registro_accesos.csv"');
+    return res.status(200).send(csv);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'No fue posible exportar el registro de accesos',
+      error: error?.message || String(error),
+    });
+  }
+};
+
+const exportAcceptedTermsCsv = async (req, res) => {
+  try {
+    const rows = await listAllTermsAcceptancesForExport({
+      search: req.query.search,
+      termsVersion: req.query.termsVersion,
+    });
+
+    const headers = [
+      'Fecha aceptación',
+      'Versión términos',
+      'Usuario ID',
+      'Correo',
+      'Nombre usuario',
+      'Rol',
+      'Estado usuario',
+      'Cédula',
+      'Nombre colaborador',
+      'Cargo',
+      'Área',
+      'Fecha ingreso',
+      'Plataforma',
+      'Dispositivo',
+      'IP',
+      'Versión app',
+    ];
+
+    const escapeCsv = (value) => {
+      const text = value == null ? '' : String(value);
+      if (/[",;\n\r]/.test(text)) {
+        return `"${text.replace(/"/g, '""')}"`;
+      }
+      return text;
+    };
+
+    const lines = [headers.map(escapeCsv).join(';')];
+    for (const row of rows) {
+      lines.push(
+        [
+          row.accepted_at,
+          row.terms_version,
+          row.user_id,
+          row.user_email,
+          row.user_name,
+          row.user_role,
+          row.user_status,
+          row.identification_number,
+          row.employee_name,
+          row.employee_position,
+          row.employee_department,
+          row.employee_hire_date,
+          row.client_platform,
+          row.device_label,
+          row.ip_address,
+          row.app_version,
+        ]
+          .map(escapeCsv)
+          .join(';')
+      );
+    }
+
+    const csv = `\uFEFF${lines.join('\n')}`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="terminos_aceptados.csv"');
+    return res.status(200).send(csv);
+  } catch (error) {
+    console.error('Error exportando términos aceptados:', error && error.stack ? error.stack : error);
+    res.status(500).json({
+      success: false,
+      message: 'No fue posible exportar las aceptaciones de términos',
+      error: error?.message || String(error),
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
+  getCurrentTerms,
+  listAcceptedTerms,
+  exportAcceptedTermsCsv,
+  listLoginEventsHandler,
+  exportLoginEventsCsv,
   refreshToken,
   refreshSessionToken,
   logout,

@@ -21,6 +21,8 @@ const DEFAULT_TICKET_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_WEB_BRIDGE_SESSION_TTL_MS = DEFAULT_TICKET_TTL_MS;
 const DEFAULT_HEARTBEAT_TTL_MS = 90 * 1000;
 const DEFAULT_BRIDGE_HEARTBEAT_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_WEB_STANDALONE_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const DEFAULT_WEB_STANDALONE_IDLE_TTL_MS = 30 * 60 * 1000;
 
 const addMilliseconds = (date, milliseconds) => new Date(date.getTime() + milliseconds);
 
@@ -59,6 +61,13 @@ const ticketTtlMs = () => parseDurationToMs(process.env.WEB_LAUNCH_TICKET_EXPIRE
 const webBridgeSessionTtlMs = () => parseDurationToMs(process.env.WEB_BRIDGE_SESSION_EXPIRE, DEFAULT_WEB_BRIDGE_SESSION_TTL_MS);
 const heartbeatTtlMs = () => parseDurationToMs(process.env.APP_SESSION_HEARTBEAT_TTL, DEFAULT_HEARTBEAT_TTL_MS);
 const bridgeHeartbeatTtlMs = () => parseDurationToMs(process.env.WEB_LAUNCH_HEARTBEAT_TTL, DEFAULT_BRIDGE_HEARTBEAT_TTL_MS);
+const webStandaloneSessionTtlMs = () =>
+  parseDurationToMs(process.env.WEB_STANDALONE_SESSION_EXPIRE, DEFAULT_WEB_STANDALONE_SESSION_TTL_MS);
+const webStandaloneIdleTtlMs = () =>
+  parseDurationToMs(process.env.WEB_STANDALONE_IDLE_EXPIRE, DEFAULT_WEB_STANDALONE_IDLE_TTL_MS);
+
+const isWebStandaloneDeviceLabel = (deviceLabel) =>
+  (deviceLabel || '').toString().trim().toLowerCase().startsWith('web');
 
 const resolveWebBridgeSessionExpiry = ({
   now = new Date(),
@@ -206,11 +215,17 @@ const ensureAuthSessionSchema = async () => {
   }
 };
 
-const createAppSession = async ({ user, deviceLabel = 'mobile-app' }) => {
+const createAppSession = async ({ user, deviceLabel = 'mobile-app', ttlMs = null }) => {
   await ensureAuthSessionSchema();
 
   const jwtSessionId = createId(24);
-  const expiresAt = addMilliseconds(new Date(), appSessionTtlMs());
+  const resolvedTtlMs =
+    ttlMs != null
+      ? ttlMs
+      : isWebStandaloneDeviceLabel(deviceLabel)
+        ? webStandaloneSessionTtlMs()
+        : appSessionTtlMs();
+  const expiresAt = addMilliseconds(new Date(), resolvedTtlMs);
   const expiresAtSql = toSqlDatetime(expiresAt);
 
   const connection = await pool.getConnection();
@@ -845,7 +860,7 @@ const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => 
     } else {
       const [rows] = await connection.execute(
         `
-          SELECT id, session_status, last_seen_at, expires_at
+          SELECT id, session_status, last_seen_at, expires_at, device_label
           FROM auth_app_sessions
           WHERE jwt_session_id = ?
           LIMIT 1
@@ -860,11 +875,25 @@ const getSessionState = async ({ jwtSessionId, sessionType, touch = false }) => 
       const item = rows[0];
       const now = Date.now();
       const expiresAt = getSqlDatetimeMillis(item.expires_at);
+      const lastSeenAt = getSqlDatetimeMillis(item.last_seen_at) || 0;
       if (item.session_status !== SESSION_STATUS_ACTIVE) {
         return { valid: false, reason: 'session_revoked' };
       }
       if (expiresAt != null && expiresAt <= now) {
         return { valid: false, reason: 'session_expired' };
+      }
+      if (isWebStandaloneDeviceLabel(item.device_label)) {
+        if (lastSeenAt + webStandaloneIdleTtlMs() <= now) {
+          await connection.execute(
+            `
+              UPDATE auth_app_sessions
+              SET session_status = ?, updated_at = NOW()
+              WHERE id = ? AND session_status = ?
+            `,
+            [SESSION_STATUS_EXPIRED, item.id, SESSION_STATUS_ACTIVE],
+          );
+          return { valid: false, reason: 'web_idle_timeout' };
+        }
       }
 
       result = {
@@ -898,6 +927,9 @@ module.exports = {
   TICKET_STATUS_REVOKED,
   ensureAuthSessionSchema,
   createAppSession,
+  webStandaloneSessionTtlMs,
+  webStandaloneIdleTtlMs,
+  isWebStandaloneDeviceLabel,
   createWebLaunchTicket,
   consumeWebLaunchTicket,
   revokeAppSessionByJwtSessionId,

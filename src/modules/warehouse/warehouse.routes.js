@@ -11,4 +11,12 @@ router.post('/assets/import', verifyToken, verifyModuleAccess('warehouse', 'crea
 router.get('/movements', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.listMovements);
 router.post('/movements', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.createMovement);
 
+router.get('/delivery-notes', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.listRemisiones);
+router.get('/delivery-notes/:id', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.getRemision);
+router.post('/delivery-notes', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.createRemision);
+router.patch('/delivery-notes/:id', verifyToken, verifyModuleAccess('warehouse', 'update'), controller.patchRemision);
+router.post('/delivery-notes/:id/lines', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.addRemisionLine);
+router.post('/delivery-notes/:id/deliver', verifyToken, verifyModuleAccess('warehouse', 'update'), controller.deliverRemision);
+router.post('/delivery-notes/:id/cancel', verifyToken, verifyModuleAccess('warehouse', 'update'), controller.cancelRemision);
+
 module.exports = router;

@@ -1,0 +1,27 @@
+-- Aceptación única de términos y condiciones por usuario y versión
+CREATE TABLE IF NOT EXISTS user_terms_acceptances (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  terms_version VARCHAR(32) NOT NULL,
+  accepted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  user_email VARCHAR(255) NOT NULL,
+  user_name VARCHAR(255) NOT NULL,
+  user_role VARCHAR(50) NOT NULL,
+  user_status VARCHAR(32) NULL,
+  identification_number VARCHAR(50) NULL,
+  employee_name VARCHAR(255) NULL,
+  employee_position VARCHAR(100) NULL,
+  employee_department VARCHAR(100) NULL,
+  employee_hire_date DATE NULL,
+  device_label VARCHAR(120) NULL,
+  client_platform VARCHAR(32) NULL,
+  ip_address VARCHAR(120) NULL,
+  user_agent TEXT NULL,
+  app_version VARCHAR(32) NULL,
+  acceptance_payload JSON NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_user_terms_user_version (user_id, terms_version),
+  KEY idx_user_terms_accepted_at (accepted_at),
+  KEY idx_user_terms_user_id (user_id),
+  CONSTRAINT fk_user_terms_user FOREIGN KEY (user_id) REFERENCES users (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
