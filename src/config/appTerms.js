@@ -21,7 +21,11 @@ const isValidPublicHttpUrl = (value) => {
   if (!value) return false;
   try {
     const u = new URL(value);
-    return u.protocol === 'http:' || u.protocol === 'https:';
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const host = (u.hostname || '').trim().toLowerCase();
+    if (!host || host.includes('...') || host === 'example.com') return false;
+    if (/\.\.\./.test(value)) return false;
+    return true;
   } catch (_) {
     return false;
   }

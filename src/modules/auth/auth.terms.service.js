@@ -3,6 +3,9 @@ const { CURRENT_TERMS_VERSION } = require('../../config/appTerms');
 
 const termsSchemaState = { ready: false };
 
+/** mysql2 rejects `undefined` in execute() bindings — normalize to SQL NULL. */
+const sqlBind = (value) => (value === undefined ? null : value);
+
 const ensureUserTermsSchema = async () => {
   if (termsSchemaState.ready) return;
 
@@ -94,7 +97,7 @@ const hasUserAcceptedTerms = async (userId, termsVersion = CURRENT_TERMS_VERSION
   });
 };
 
-const buildAcceptanceSnapshot = ({ user, profile, req }) => {
+const buildAcceptanceSnapshot = ({ user, profile, req, termsVersion = CURRENT_TERMS_VERSION }) => {
   const clientPlatform = (req.headers['x-skaler-client'] || 'mobile').toString().trim().toLowerCase();
   const deviceLabel = (req.headers['x-device-label'] || req.headers['x-skaler-device'] || 'mobile-app')
     .toString()
@@ -117,24 +120,24 @@ const buildAcceptanceSnapshot = ({ user, profile, req }) => {
   const role = profile?.role || user.role;
 
   return {
-    user_email: email,
-    user_name: name,
-    user_role: role,
-    user_status: profile?.status || user.status || null,
-    identification_number: profile?.identification_number || null,
-    employee_name: profile?.employee_name || null,
-    employee_position: profile?.employee_position || null,
-    employee_department: profile?.employee_department || null,
-    employee_hire_date: profile?.employee_hire_date || null,
-    device_label: deviceLabel,
-    client_platform: clientPlatform,
-    ip_address: ipAddress,
-    user_agent: userAgent,
-    app_version: appVersion,
+    user_email: sqlBind(email),
+    user_name: sqlBind(name),
+    user_role: sqlBind(role),
+    user_status: sqlBind(profile?.status ?? user.status ?? null),
+    identification_number: sqlBind(profile?.identification_number ?? null),
+    employee_name: sqlBind(profile?.employee_name ?? null),
+    employee_position: sqlBind(profile?.employee_position ?? null),
+    employee_department: sqlBind(profile?.employee_department ?? null),
+    employee_hire_date: sqlBind(profile?.employee_hire_date ?? null),
+    device_label: sqlBind(deviceLabel),
+    client_platform: sqlBind(clientPlatform),
+    ip_address: sqlBind(ipAddress),
+    user_agent: sqlBind(userAgent),
+    app_version: sqlBind(appVersion),
     acceptance_payload: {
-      userCreatedAt: profile?.user_created_at || null,
+      userCreatedAt: profile?.user_created_at ?? null,
       acceptedFromLogin: true,
-      termsVersion: CURRENT_TERMS_VERSION,
+      termsVersion: termsVersion || CURRENT_TERMS_VERSION,
     },
   };
 };
@@ -142,7 +145,7 @@ const buildAcceptanceSnapshot = ({ user, profile, req }) => {
 const recordTermsAcceptance = async ({ user, req, termsVersion = CURRENT_TERMS_VERSION }) => {
   await ensureUserTermsSchema();
   const profile = await loadUserTermsProfile(user.id);
-  const snapshot = buildAcceptanceSnapshot({ user, profile, req });
+  const snapshot = buildAcceptanceSnapshot({ user, profile, req, termsVersion });
 
   return withConnection(async (connection) => {
     const [result] = await connection.execute(
@@ -188,20 +191,20 @@ const recordTermsAcceptance = async ({ user, req, termsVersion = CURRENT_TERMS_V
       [
         user.id,
         termsVersion,
-        snapshot.user_email,
-        snapshot.user_name,
-        snapshot.user_role,
-        snapshot.user_status,
-        snapshot.identification_number,
-        snapshot.employee_name,
-        snapshot.employee_position,
-        snapshot.employee_department,
-        snapshot.employee_hire_date,
-        snapshot.device_label,
-        snapshot.client_platform,
-        snapshot.ip_address,
-        snapshot.user_agent,
-        snapshot.app_version,
+        sqlBind(snapshot.user_email),
+        sqlBind(snapshot.user_name),
+        sqlBind(snapshot.user_role),
+        sqlBind(snapshot.user_status),
+        sqlBind(snapshot.identification_number),
+        sqlBind(snapshot.employee_name),
+        sqlBind(snapshot.employee_position),
+        sqlBind(snapshot.employee_department),
+        sqlBind(snapshot.employee_hire_date),
+        sqlBind(snapshot.device_label),
+        sqlBind(snapshot.client_platform),
+        sqlBind(snapshot.ip_address),
+        sqlBind(snapshot.user_agent),
+        sqlBind(snapshot.app_version),
         JSON.stringify(snapshot.acceptance_payload),
       ]
     );
