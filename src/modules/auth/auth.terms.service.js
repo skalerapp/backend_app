@@ -99,9 +99,13 @@ const hasUserAcceptedTerms = async (userId, termsVersion = CURRENT_TERMS_VERSION
 
 const buildAcceptanceSnapshot = ({ user, profile, req, termsVersion = CURRENT_TERMS_VERSION }) => {
   const clientPlatform = (req.headers['x-skaler-client'] || 'mobile').toString().trim().toLowerCase();
-  const deviceLabel = (req.headers['x-device-label'] || req.headers['x-skaler-device'] || 'mobile-app')
+  const headerDevice = (req.headers['x-device-label'] || req.headers['x-skaler-device'] || '')
     .toString()
-    .trim()
+    .trim();
+  const deviceLabel = (
+    headerDevice ||
+    (clientPlatform === 'web' ? 'web-browser-standalone' : 'mobile-app')
+  )
     .slice(0, 120);
   const appVersion = (req.headers['x-skaler-app-version'] || req.body?.appVersion || null)
     ?.toString()
