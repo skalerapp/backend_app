@@ -6,6 +6,22 @@ const {
 
 const OUTBOUND_TYPES = new Set(['delivery', 'assignment']);
 
+const addColumnIfMissing = async (connection, tableName, columnName, columnDefinition) => {
+  const [rows] = await connection.execute(
+    `SELECT COUNT(*) AS total
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?`,
+    [tableName, columnName],
+  );
+  if (Number(rows[0]?.total || 0) === 0) {
+    await connection.execute(
+      `ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDefinition}`,
+    );
+  }
+};
+
 const ensureDeliveryNotesSchema = async (connection) => {
   await connection.execute(`
     CREATE TABLE IF NOT EXISTS warehouse_delivery_notes (
@@ -107,15 +123,32 @@ const ensureDeliveryNotesSchema = async (connection) => {
     );
   }
 
-  const [physicalCol] = await connection.execute(
-    `SELECT COUNT(*) AS total FROM information_schema.columns
-     WHERE table_schema = DATABASE() AND table_name = 'warehouse_delivery_notes' AND column_name = 'physical_remision_path'`,
-  );
-  if (Number(physicalCol[0]?.total || 0) === 0) {
-    await connection.execute(
-      'ALTER TABLE warehouse_delivery_notes ADD COLUMN physical_remision_path VARCHAR(500) NULL AFTER evidence_path',
-    );
+  await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'evidence_path', 'VARCHAR(500) NULL');
+  await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'physical_remision_path', 'VARCHAR(500) NULL');
+  await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'receiving_signature_data', 'LONGTEXT NULL');
+  await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'receiving_signature_name', 'VARCHAR(160) NULL');
+};
+
+const sanitizePatchPayload = (body) => {
+  const safe = {};
+  const keys = [
+    'dispatcher_name',
+    'transporter_type',
+    'transporter_name',
+    'transporter_company',
+    'transporter_user_id',
+    'site_receiver_name',
+    'site_receiver_user_id',
+    'dispatch_note',
+    'notes',
+    'physical_remision_path',
+  ];
+  for (const key of keys) {
+    if (body && body[key] !== undefined) {
+      safe[key] = body[key];
+    }
   }
+  return safe;
 };
 
 const isActiveProjectStatus = (status) => {
@@ -566,7 +599,7 @@ const updateDeliveryNote = async (connection, req, noteId, body) => {
     reason: reason || null,
     userId: Number(req.user?.id || 0) || null,
     userName: normalizeText(req.user?.name) || null,
-    payload: body,
+    payload: sanitizePatchPayload(body),
   });
 
   return fetchDeliveryNoteById(connection, noteId);
