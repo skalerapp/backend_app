@@ -378,7 +378,8 @@ const listDeliveryNotes = async (connection, { projectId, status, limit }) => {
   return rows.map(mapNoteRow);
 };
 
-const assertNoteEditable = (note, { requireReason }) => {
+const assertNoteEditable = (note, options = {}) => {
+  const { requireReason = false } = options;
   if (note.status === 'cancelled') {
     throw new HttpError(409, 'La remisión está cancelada y no admite cambios');
   }
