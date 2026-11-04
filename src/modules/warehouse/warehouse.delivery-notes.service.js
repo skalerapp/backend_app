@@ -372,7 +372,7 @@ const createDeliveryNote = async (connection, req, body) => {
   }
 
   const transporterName = normalizeText(body.transporter_name);
-  const siteReceiverName = normalizeText(body.site_receiver_name);
+  const siteReceiverName = normalizeText(body.site_receiver_name) || 'Recepción pendiente en obra';
   const sessionUserName = normalizeText(req.user?.name);
   const dispatcherName = sessionUserName || normalizeText(body.dispatcher_name);
 
@@ -381,9 +381,6 @@ const createDeliveryNote = async (connection, req, body) => {
   }
   if (!transporterName) {
     throw new HttpError(400, 'Debes indicar quién transporta el material');
-  }
-  if (!siteReceiverName) {
-    throw new HttpError(400, 'Debes indicar quién recibe el material en destino');
   }
 
   const project = await loadProjectSnapshot(connection, projectId);
