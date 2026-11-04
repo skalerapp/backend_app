@@ -534,6 +534,7 @@ const updateDeliveryNote = async (connection, req, noteId, body) => {
     ['site_receiver_name', body.site_receiver_name],
     ['dispatch_note', body.dispatch_note],
     ['notes', body.notes],
+    ['physical_remision_path', body.physical_remision_path],
   ];
 
   for (const [column, value] of patchFields) {
