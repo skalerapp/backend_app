@@ -136,7 +136,7 @@ GET http://localhost:3000/api/health
 | `/api/labor-permissions` | Permisos laborales |
 | `/api/allowances` | Viáticos, solicitudes y gastos |
 | `/api/materials` | Materiales por proyecto |
-| `/api/warehouse` | Almacén de materiales/herramientas (activos, movimientos, retornos) |
+| `/api/warehouse` | Almacén (activos, movimientos, retornos, **remisiones** `/delivery-notes`) |
 | `/api/fleet` | Control de flota (unidades, alertas documentales, mantenimientos) |
 | `/api/operational-scopes` | Alcances operativos por rol |
 | `/api/commercial` | Comercial V2 (clientes, visitas, embudo, cotizaciones) |
@@ -182,11 +182,21 @@ Endpoint público `GET /api/app/version`. Variables en Railway (plantilla: `.env
 
 Releases APK: repo `skalerapp/skaler-app-updates` — ver `documentation/APP_RELEASES_GITHUB.md`.
 
-### Almacén — migración MySQL
+### Almacén — migración MySQL y remisiones
 
-`ensureWarehouseShape` usa `information_schema` para agregar columnas (MySQL 8 no soporta `ADD COLUMN IF NOT EXISTS`). Si ves error 500 en `/api/warehouse/assets`, despliega la versión actual de `warehouse.service.js`.
+`ensureWarehouseShape` y `ensureDeliveryNotesSchema` agregan columnas vía `information_schema` (MySQL 8 no soporta `ADD COLUMN IF NOT EXISTS`). Incluye tablas `warehouse_delivery_notes`, líneas, eventos y columnas como `physical_remision_path`.
 
-Export de inventario (bodega vs proyectos) se calcula en Flutter a partir de activos + movimientos; ver [documentation/APP_FLOW_WAREHOUSE_LOGISTICS.md](../documentation/APP_FLOW_WAREHOUSE_LOGISTICS.md).
+| Método | Ruta |
+|--------|------|
+| GET/POST | `/api/warehouse/delivery-notes` |
+| GET/PATCH | `/api/warehouse/delivery-notes/:id` |
+| POST | `/api/warehouse/delivery-notes/:id/lines` |
+| POST | `/api/warehouse/delivery-notes/:id/deliver` |
+| POST | `/api/warehouse/delivery-notes/:id/cancel` |
+
+Servicio: `src/modules/warehouse/warehouse.delivery-notes.service.js`. Release **1.0.7**: script Railway `scripts/set_railway_vars_v1_0_7.ps1`.
+
+Export de inventario (bodega vs proyectos) se calcula en Flutter; ver [documentation/APP_FLOW_WAREHOUSE_LOGISTICS.md](../documentation/APP_FLOW_WAREHOUSE_LOGISTICS.md).
 
 ### Flota — reglas clave
 
