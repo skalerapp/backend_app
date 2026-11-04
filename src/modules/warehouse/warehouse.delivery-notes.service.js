@@ -30,6 +30,7 @@ const ensureDeliveryNotesSchema = async (connection) => {
       receiving_signature_name VARCHAR(160) NULL,
       receiving_signature_data LONGTEXT NULL,
       evidence_path VARCHAR(500) NULL,
+      physical_remision_path VARCHAR(500) NULL,
       dispatch_note VARCHAR(255) NULL,
       notes TEXT NULL,
       cancel_reason TEXT NULL,
@@ -105,6 +106,21 @@ const ensureDeliveryNotesSchema = async (connection) => {
       'ALTER TABLE warehouse_asset_movements ADD INDEX idx_wm_delivery_note (delivery_note_id)',
     );
   }
+
+  const [physicalCol] = await connection.execute(
+    `SELECT COUNT(*) AS total FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = 'warehouse_delivery_notes' AND column_name = 'physical_remision_path'`,
+  );
+  if (Number(physicalCol[0]?.total || 0) === 0) {
+    await connection.execute(
+      'ALTER TABLE warehouse_delivery_notes ADD COLUMN physical_remision_path VARCHAR(500) NULL AFTER evidence_path',
+    );
+  }
+};
+
+const isActiveProjectStatus = (status) => {
+  const normalized = normalizeText(status).toLowerCase();
+  return normalized === 'active' || normalized === 'activo';
 };
 
 const normalizeText = (value) => (value ?? '').toString().trim();
@@ -179,11 +195,14 @@ const logDeliveryNoteEvent = async (connection, {
 
 const loadProjectSnapshot = async (connection, projectId) => {
   const [rows] = await connection.execute(
-    'SELECT id, name, ot_code FROM projects WHERE id = ? LIMIT 1',
+    'SELECT id, name, ot_code, status FROM projects WHERE id = ? LIMIT 1',
     [projectId],
   );
   if (!rows.length) {
     throw new HttpError(404, 'Proyecto no encontrado');
+  }
+  if (!isActiveProjectStatus(rows[0].status)) {
+    throw new HttpError(400, 'Solo puedes despachar a proyectos activos');
   }
   return rows[0];
 };
@@ -354,10 +373,11 @@ const createDeliveryNote = async (connection, req, body) => {
 
   const transporterName = normalizeText(body.transporter_name);
   const siteReceiverName = normalizeText(body.site_receiver_name);
-  const dispatcherName = normalizeText(body.dispatcher_name) || normalizeText(req.user?.name);
+  const sessionUserName = normalizeText(req.user?.name);
+  const dispatcherName = sessionUserName || normalizeText(body.dispatcher_name);
 
   if (!dispatcherName) {
-    throw new HttpError(400, 'Debes indicar quién despacha el material');
+    throw new HttpError(400, 'No se pudo identificar al usuario de sesión que despacha');
   }
   if (!transporterName) {
     throw new HttpError(400, 'Debes indicar quién transporta el material');
@@ -368,7 +388,6 @@ const createDeliveryNote = async (connection, req, body) => {
 
   const project = await loadProjectSnapshot(connection, projectId);
   const sessionUserId = Number(req.user?.id || 0);
-  const sessionUserName = normalizeText(req.user?.name);
 
   const { remisionNumber, numberMode } = await reserveRemisionNumber(connection, {
     useAutoNumber: body.use_auto_remision_number !== false && !normalizeText(body.remision_number),
@@ -378,9 +397,10 @@ const createDeliveryNote = async (connection, req, body) => {
   const header = {
     dispatch_note: normalizeText(body.dispatch_note) || null,
     evidence_path: normalizeText(body.evidence_path) || null,
+    physical_remision_path: normalizeText(body.physical_remision_path) || null,
     notes: normalizeText(body.notes) || null,
     dispatcher_name: dispatcherName,
-    dispatcher_user_id: Number(body.dispatcher_user_id) || sessionUserId || null,
+    dispatcher_user_id: sessionUserId || Number(body.dispatcher_user_id) || null,
     receiving_signature_name: normalizeText(body.receiving_signature_name) || null,
     receiving_signature_data: body.receiving_signature_data || null,
     site_receiver_user_id: Number(body.site_receiver_user_id) || null,
@@ -394,8 +414,8 @@ const createDeliveryNote = async (connection, req, body) => {
        transporter_type, transporter_user_id, transporter_name, transporter_company,
        site_receiver_name, site_receiver_user_id,
        delivery_signature_name, receiving_signature_name, receiving_signature_data,
-       evidence_path, dispatch_note, notes, created_by_user_id
-     ) VALUES (?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       evidence_path, physical_remision_path, dispatch_note, notes, created_by_user_id
+     ) VALUES (?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       remisionNumber,
       numberMode,
@@ -416,6 +436,7 @@ const createDeliveryNote = async (connection, req, body) => {
       header.receiving_signature_name,
       header.receiving_signature_data,
       header.evidence_path,
+      header.physical_remision_path,
       header.dispatch_note,
       header.notes,
       sessionUserId || null,
