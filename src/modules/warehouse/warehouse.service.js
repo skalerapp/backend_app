@@ -54,6 +54,15 @@ const normalizeIntakeOrigin = (value) => {
   return 'purchase';
 };
 
+const ALLOWED_LIFECYCLE_STATUSES = new Set([
+  'available',
+  'damaged',
+  'sold',
+  'retired',
+  'review',
+  'partial',
+]);
+
 const normalizeLifecycleStatus = (value) => {
   const raw = normalizeText(value);
   if (!raw) {
@@ -84,6 +93,33 @@ const normalizeLifecycleStatus = (value) => {
   }
 
   return { assetStatus: raw, lifecycleStatus: 'available' };
+};
+
+const LIFECYCLE_STATUS_LABELS = {
+  available: 'Disponible',
+  damaged: 'Averiado',
+  sold: 'Vendido',
+  retired: 'Retirado',
+  review: 'Por revisar',
+  partial: 'Incompleto',
+};
+
+/**
+ * lifecycle_status = slug interno (available, damaged, ...).
+ * asset_status = texto legible o motivo corto que ve el usuario.
+ */
+const resolveAssetStatusFields = (payload) => {
+  const slugRaw = normalizeText(payload.lifecycle_status)?.toLowerCase() ?? null;
+  const assetStatusFree = normalizeText(payload.asset_status);
+
+  if (slugRaw && ALLOWED_LIFECYCLE_STATUSES.has(slugRaw)) {
+    return {
+      assetStatus: assetStatusFree || LIFECYCLE_STATUS_LABELS[slugRaw] || slugRaw,
+      lifecycleStatus: slugRaw,
+    };
+  }
+
+  return normalizeLifecycleStatus(payload.asset_status);
 };
 
 const normalizeForLookup = (value) => {
@@ -268,7 +304,7 @@ const normalizeWarehouseAssetPayload = (payload) => {
     ? Number(payload.intake_origin_project_id)
     : (Number.isFinite(Number(payload.project_id)) ? Number(payload.project_id) : null);
   const notes = normalizeText(payload.notes);
-  const status = normalizeLifecycleStatus(payload.asset_status);
+  const status = resolveAssetStatusFields(payload);
 
   return {
     assetCode,
@@ -551,6 +587,7 @@ const updateWarehouseAssetById = async (connection, assetId, asset) => {
   const [result] = await connection.execute(
     `UPDATE warehouse_assets
      SET
+       asset_code = ?,
        sku_code = ?,
        asset_name = ?,
        category_name = ?,
@@ -572,10 +609,13 @@ const updateWarehouseAssetById = async (connection, assetId, asset) => {
        soat_due_date = ?,
        technical_due_date = ?,
        technical_detail = ?,
+       intake_origin = ?,
+       intake_origin_project_id = ?,
        notes = ?,
        updated_at = NOW()
      WHERE id = ?`,
     [
+      asset.assetCode,
       asset.skuCode,
       asset.assetName,
       asset.categoryName,
@@ -597,6 +637,8 @@ const updateWarehouseAssetById = async (connection, assetId, asset) => {
       asset.soatDueDate,
       asset.technicalDueDate,
       asset.technicalDetail,
+      asset.intakeOrigin,
+      asset.intakeOriginProjectId,
       asset.notes,
       assetId,
     ]
@@ -618,6 +660,7 @@ module.exports = {
   normalizeIntakeOrigin,
   parseFlexibleDate,
   normalizeWarehouseAssetPayload,
+  resolveAssetStatusFields,
   shouldImportWarehouseAsset,
   upsertWarehouseAsset,
   updateWarehouseAssetById,

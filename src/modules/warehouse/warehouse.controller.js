@@ -11,6 +11,7 @@ const {
   isFleetAssetLike,
   applyMovementStockAdjustment,
   normalizeIntakeOrigin,
+  normalizeText,
   normalizeWarehouseAssetPayload,
   shouldImportWarehouseAsset,
   upsertWarehouseAsset,
@@ -298,11 +299,27 @@ const updateAsset = async (req, res) => {
       await ensureWarehouseShape(connection);
 
       const [existingRows] = await connection.execute(
-        'SELECT id FROM warehouse_assets WHERE id = ? LIMIT 1',
+        'SELECT * FROM warehouse_assets WHERE id = ? LIMIT 1',
         [assetId]
       );
       if (!existingRows.length) {
         throw new HttpError(404, 'Activo de almacen no encontrado');
+      }
+      const existingRow = existingRows[0];
+      const prevLifecycle = (existingRow?.lifecycle_status ?? '').toString().trim().toLowerCase();
+      const nextLifecycle = (normalized.lifecycleStatus ?? '').toString().trim().toLowerCase();
+      const lifecycleChanged =
+        prevLifecycle.length > 0 && nextLifecycle.length > 0 && prevLifecycle !== nextLifecycle;
+      const reason = normalizeText(payload.status_change_reason ?? payload.status_change_note);
+      if (lifecycleChanged && !reason) {
+        throw new HttpError(400, 'Indica el motivo del cambio de estado operativo (campo status_change_reason)');
+      }
+      if (lifecycleChanged && reason) {
+        const stamp = new Date().toISOString();
+        const who = normalizeText(req.user?.name);
+        const whoSuffix = who ? ` · ${who}` : '';
+        const line = `[${stamp}] Estado ${prevLifecycle} -> ${nextLifecycle}. Motivo: ${reason}${whoSuffix}`;
+        normalized.notes = normalized.notes ? `${normalized.notes}\n${line}` : line;
       }
 
       await applyAuditContext(connection, req);

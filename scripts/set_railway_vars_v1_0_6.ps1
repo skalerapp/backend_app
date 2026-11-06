@@ -6,6 +6,8 @@
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "railway_cli_helpers.ps1")
+
 $vars = @{
     "APP_VERSION_CHECK_ENABLED"   = "true"
     "APP_LATEST_VERSION"            = "1.0.6"
@@ -27,12 +29,7 @@ $vars = @{
 Write-Host "Actualizando variables Railway para SKALER v1.0.6..." -ForegroundColor Cyan
 
 foreach ($entry in $vars.GetEnumerator()) {
-    Write-Host "  $($entry.Key) = $($entry.Value)"
-    npm exec --yes @railway/cli -- variables set "$($entry.Key)=$($entry.Value)" 2>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error al setear $($entry.Key). ¿Ejecutaste 'railway login' y 'railway link'?" -ForegroundColor Red
-        exit 1
-    }
+    Set-RailwayVariable -Key $entry.Key -Value $entry.Value
 }
 
 Write-Host ""
