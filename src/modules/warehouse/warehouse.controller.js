@@ -16,6 +16,9 @@ const {
   shouldImportWarehouseAsset,
   upsertWarehouseAsset,
   updateWarehouseAssetById,
+  diffWarehouseAssetSnapshots,
+  insertWarehouseAssetEdit,
+  listWarehouseAssetEdits,
 } = require('./warehouse.service');
 const {
   listDeliveryNotes,
@@ -314,13 +317,6 @@ const updateAsset = async (req, res) => {
       if (lifecycleChanged && !reason) {
         throw new HttpError(400, 'Indica el motivo del cambio de estado operativo (campo status_change_reason)');
       }
-      if (lifecycleChanged && reason) {
-        const stamp = new Date().toISOString();
-        const who = normalizeText(req.user?.name);
-        const whoSuffix = who ? ` · ${who}` : '';
-        const line = `[${stamp}] Estado ${prevLifecycle} -> ${nextLifecycle}. Motivo: ${reason}${whoSuffix}`;
-        normalized.notes = normalized.notes ? `${normalized.notes}\n${line}` : line;
-      }
 
       await applyAuditContext(connection, req);
       const updated = await updateWarehouseAssetById(connection, assetId, normalized);
@@ -332,7 +328,24 @@ const updateAsset = async (req, res) => {
         'SELECT * FROM warehouse_assets WHERE id = ? LIMIT 1',
         [assetId]
       );
-      return rows[0];
+      const newRow = rows[0];
+      const diff = diffWarehouseAssetSnapshots(existingRow, newRow);
+      const hasFieldChanges = Object.keys(diff.changed).length > 0;
+      if (hasFieldChanges || lifecycleChanged) {
+        await insertWarehouseAssetEdit(connection, {
+          assetId,
+          userId: Number(req.user?.id || 0) || null,
+          userName: normalizeText(req.user?.name),
+          prevLifecycle: lifecycleChanged ? prevLifecycle : null,
+          nextLifecycle: lifecycleChanged ? nextLifecycle : null,
+          statusChangeReason: lifecycleChanged ? reason : null,
+          changedFields: diff.changed,
+          prevSnapshot: diff.before,
+          nextSnapshot: diff.after,
+        });
+      }
+
+      return newRow;
     });
 
     res.json({
@@ -738,6 +751,30 @@ const deliverRemision = async (req, res) => {
   }
 };
 
+const listAssetEditHistory = async (req, res) => {
+  try {
+    const assetId = Number(req.params.id);
+    if (!Number.isFinite(assetId) || assetId <= 0) {
+      return res.status(400).json({ success: false, message: 'ID de activo invalido' });
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const rows = await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      const [exists] = await connection.execute(
+        'SELECT id FROM warehouse_assets WHERE id = ? LIMIT 1',
+        [assetId],
+      );
+      if (!exists.length) {
+        throw new HttpError(404, 'Activo de almacen no encontrado');
+      }
+      return listWarehouseAssetEdits(connection, assetId, limit);
+    });
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al listar historial del activo');
+  }
+};
+
 const cancelRemision = async (req, res) => {
   try {
     const noteId = Number(req.params.id);
@@ -765,6 +802,7 @@ module.exports = {
   listDispatchReceivers,
   createAsset,
   updateAsset,
+  listAssetEditHistory,
   importAssets,
   listMovements,
   createMovement,

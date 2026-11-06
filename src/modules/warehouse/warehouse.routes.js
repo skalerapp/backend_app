@@ -7,6 +7,7 @@ router.get('/assets', verifyToken, verifyModuleAccess('warehouse', 'read'), cont
 router.get('/dispatch-receivers', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.listDispatchReceivers);
 router.post('/assets', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.createAsset);
 router.put('/assets/:id', verifyToken, verifyModuleAccess('warehouse', 'update'), controller.updateAsset);
+router.get('/assets/:id/edits', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.listAssetEditHistory);
 router.post('/assets/import', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.importAssets);
 router.get('/movements', verifyToken, verifyModuleAccess('warehouse', 'read'), controller.listMovements);
 router.post('/movements', verifyToken, verifyModuleAccess('warehouse', 'create'), controller.createMovement);

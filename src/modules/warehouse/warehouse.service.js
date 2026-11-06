@@ -481,6 +481,145 @@ const ensureWarehouseShape = async (connection) => {
 
   const { ensureDeliveryNotesSchema } = require('./warehouse.delivery-notes.service');
   await ensureDeliveryNotesSchema(connection);
+
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS warehouse_asset_edits (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      asset_id INT NOT NULL,
+      user_id INT NULL,
+      user_name VARCHAR(160) NULL,
+      prev_lifecycle_status VARCHAR(50) NULL,
+      next_lifecycle_status VARCHAR(50) NULL,
+      status_change_reason TEXT NULL,
+      changed_fields JSON NULL,
+      prev_snapshot JSON NULL,
+      next_snapshot JSON NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_wae_asset (asset_id),
+      INDEX idx_wae_created (created_at),
+      CONSTRAINT fk_wae_asset FOREIGN KEY (asset_id) REFERENCES warehouse_assets (id) ON DELETE CASCADE
+    )
+  `);
+};
+
+const ASSET_EDIT_SNAPSHOT_KEYS = [
+  'asset_code',
+  'sku_code',
+  'asset_name',
+  'category_name',
+  'unit_measure',
+  'brand',
+  'serial_number',
+  'model',
+  'work_order',
+  'client_name',
+  'dispatch_note',
+  'asset_status',
+  'lifecycle_status',
+  'current_city',
+  'minimum_stock',
+  'current_stock',
+  'vehicle_plate',
+  'vehicle_type',
+  'insurance_due_date',
+  'soat_due_date',
+  'technical_due_date',
+  'technical_detail',
+  'intake_origin',
+  'intake_origin_project_id',
+  'notes',
+];
+
+const serializeAssetCell = (value) => {
+  if (value === undefined || value === null) return null;
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  const s = value.toString().trim();
+  return s.length ? s : null;
+};
+
+const buildWarehouseAssetSnapshot = (row) => {
+  const o = {};
+  if (!row) return o;
+  ASSET_EDIT_SNAPSHOT_KEYS.forEach((k) => {
+    o[k] = serializeAssetCell(row[k]);
+  });
+  return o;
+};
+
+const diffWarehouseAssetSnapshots = (beforeRow, afterRow) => {
+  const before = buildWarehouseAssetSnapshot(beforeRow);
+  const after = buildWarehouseAssetSnapshot(afterRow);
+  const changed = {};
+  ASSET_EDIT_SNAPSHOT_KEYS.forEach((k) => {
+    const b = before[k] ?? null;
+    const a = after[k] ?? null;
+    if (b !== a) {
+      changed[k] = [b, a];
+    }
+  });
+  return { before, after, changed };
+};
+
+const insertWarehouseAssetEdit = async (connection, {
+  assetId,
+  userId,
+  userName,
+  prevLifecycle,
+  nextLifecycle,
+  statusChangeReason,
+  changedFields,
+  prevSnapshot,
+  nextSnapshot,
+}) => {
+  await connection.execute(
+    `INSERT INTO warehouse_asset_edits (
+       asset_id, user_id, user_name,
+       prev_lifecycle_status, next_lifecycle_status, status_change_reason,
+       changed_fields, prev_snapshot, next_snapshot
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      assetId,
+      userId || null,
+      userName || null,
+      prevLifecycle || null,
+      nextLifecycle || null,
+      statusChangeReason || null,
+      changedFields && Object.keys(changedFields).length ? JSON.stringify(changedFields) : null,
+      prevSnapshot && Object.keys(prevSnapshot).length ? JSON.stringify(prevSnapshot) : null,
+      nextSnapshot && Object.keys(nextSnapshot).length ? JSON.stringify(nextSnapshot) : null,
+    ],
+  );
+};
+
+const listWarehouseAssetEdits = async (connection, assetId, limit = 50) => {
+  const cap = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const [rows] = await connection.execute(
+    `SELECT id, asset_id, user_id, user_name,
+            prev_lifecycle_status, next_lifecycle_status, status_change_reason,
+            changed_fields, prev_snapshot, next_snapshot, created_at
+     FROM warehouse_asset_edits
+     WHERE asset_id = ?
+     ORDER BY id DESC
+     LIMIT ${cap}`,
+    [assetId],
+  );
+  return rows.map((r) => ({
+    ...r,
+    changed_fields: r.changed_fields
+      ? (typeof r.changed_fields === 'string' ? JSON.parse(r.changed_fields) : r.changed_fields)
+      : null,
+    prev_snapshot: r.prev_snapshot
+      ? (typeof r.prev_snapshot === 'string' ? JSON.parse(r.prev_snapshot) : r.prev_snapshot)
+      : null,
+    next_snapshot: r.next_snapshot
+      ? (typeof r.next_snapshot === 'string' ? JSON.parse(r.next_snapshot) : r.next_snapshot)
+      : null,
+  }));
 };
 
 const upsertWarehouseAsset = async (connection, asset) => {
@@ -664,4 +803,7 @@ module.exports = {
   shouldImportWarehouseAsset,
   upsertWarehouseAsset,
   updateWarehouseAssetById,
+  diffWarehouseAssetSnapshots,
+  insertWarehouseAssetEdit,
+  listWarehouseAssetEdits,
 };
