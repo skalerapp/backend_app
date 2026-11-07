@@ -17,6 +17,7 @@ router.post('/register', [
 ], authController.register);
 
 router.get('/terms/current', authController.getCurrentTerms);
+router.post('/terms/acceptance-status', authController.checkTermsAcceptanceStatus);
 router.get(
   '/terms/acceptances',
   verifyToken,

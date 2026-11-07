@@ -661,6 +661,52 @@ const previewWebLaunch = async (req, res) => {
   return res.redirect(302, launchUrl);
 };
 
+const checkTermsAcceptanceStatus = async (req, res) => {
+  try {
+    const identifier = (req.body?.email || req.body?.identifier || '').toString().trim().toLowerCase();
+    const termsVersion = (req.body?.termsVersion || CURRENT_TERMS_VERSION).toString().trim();
+
+    if (!identifier || !termsVersion) {
+      return res.json({
+        success: true,
+        data: { accepted: false, version: termsVersion || CURRENT_TERMS_VERSION },
+      });
+    }
+
+    await ensureUserTermsSchema();
+    const users = await withConnection(pool, async (connection) => {
+      const [rows] = await connection.execute(
+        `SELECT id
+         FROM users
+         WHERE LOWER(email) = ? OR LOWER(name) = ?
+         LIMIT 1`,
+        [identifier, identifier],
+      );
+      return rows;
+    });
+
+    if (!users.length) {
+      return res.json({
+        success: true,
+        data: { accepted: false, version: termsVersion },
+      });
+    }
+
+    const accepted = await hasUserAcceptedTerms(users[0].id, termsVersion);
+    return res.json({
+      success: true,
+      data: { accepted: Boolean(accepted), version: termsVersion },
+    });
+  } catch (error) {
+    console.error('Error consultando aceptación de términos:', error && error.stack ? error.stack : error);
+    return res.status(500).json({
+      success: false,
+      message: 'No fue posible verificar la aceptación de términos',
+      error: error?.message || String(error),
+    });
+  }
+};
+
 const getCurrentTerms = async (_req, res) => {
   try {
     res.json({
@@ -847,6 +893,7 @@ module.exports = {
   register,
   login,
   getCurrentTerms,
+  checkTermsAcceptanceStatus,
   listAcceptedTerms,
   exportAcceptedTermsCsv,
   listLoginEventsHandler,
