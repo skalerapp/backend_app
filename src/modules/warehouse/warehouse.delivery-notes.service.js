@@ -5,6 +5,7 @@ const {
 } = require('./warehouse.service');
 
 const OUTBOUND_TYPES = new Set(['delivery', 'assignment']);
+const INBOUND_REMISION_TYPES = new Set(['return']);
 
 const addColumnIfMissing = async (connection, tableName, columnName, columnDefinition) => {
   const [rows] = await connection.execute(
@@ -127,6 +128,7 @@ const ensureDeliveryNotesSchema = async (connection) => {
   await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'physical_remision_path', 'VARCHAR(500) NULL');
   await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'receiving_signature_data', 'LONGTEXT NULL');
   await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'receiving_signature_name', 'VARCHAR(160) NULL');
+  await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'activity_description', 'VARCHAR(255) NULL');
 };
 
 const sanitizePatchPayload = (body) => {
@@ -142,6 +144,7 @@ const sanitizePatchPayload = (body) => {
     'dispatch_note',
     'notes',
     'physical_remision_path',
+    'activity_description',
   ];
   for (const key of keys) {
     if (body && body[key] !== undefined) {
@@ -318,9 +321,11 @@ const mapNoteRow = (row) => ({
 const fetchDeliveryNoteById = async (connection, noteId) => {
   const [notes] = await connection.execute(
     `SELECT dn.*,
+            p.client_name AS project_client_name,
             (SELECT COUNT(*) FROM warehouse_delivery_note_lines l
              WHERE l.delivery_note_id = dn.id AND l.line_status = 'active') AS line_count
      FROM warehouse_delivery_notes dn
+     LEFT JOIN projects p ON p.id = dn.project_id
      WHERE dn.id = ?
      LIMIT 1`,
     [noteId],
@@ -401,8 +406,8 @@ const createDeliveryNote = async (connection, req, body) => {
   }
 
   const movementType = normalizeText(body.movement_type || 'delivery').toLowerCase() || 'delivery';
-  if (!OUTBOUND_TYPES.has(movementType)) {
-    throw new HttpError(400, 'movement_type debe ser delivery o assignment');
+  if (!OUTBOUND_TYPES.has(movementType) && !INBOUND_REMISION_TYPES.has(movementType)) {
+    throw new HttpError(400, 'movement_type debe ser delivery, assignment o return');
   }
 
   const transporterName = normalizeText(body.transporter_name);
@@ -439,20 +444,21 @@ const createDeliveryNote = async (connection, req, body) => {
 
   const [insertNote] = await connection.execute(
     `INSERT INTO warehouse_delivery_notes (
-       remision_number, number_mode, project_id, project_ot_code, project_name,
+       remision_number, number_mode, project_id, project_ot_code, project_name, activity_description,
        status, movement_date, movement_type,
        dispatcher_user_id, dispatcher_name,
        transporter_type, transporter_user_id, transporter_name, transporter_company,
        site_receiver_name, site_receiver_user_id,
        delivery_signature_name, receiving_signature_name, receiving_signature_data,
        evidence_path, physical_remision_path, dispatch_note, notes, created_by_user_id
-     ) VALUES (?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       remisionNumber,
       numberMode,
       projectId,
       project.ot_code || null,
       project.name || null,
+      normalizeText(body.activity_description) || null,
       body.movement_date || null,
       movementType,
       header.dispatcher_user_id,
@@ -566,6 +572,7 @@ const updateDeliveryNote = async (connection, req, noteId, body) => {
     ['dispatch_note', body.dispatch_note],
     ['notes', body.notes],
     ['physical_remision_path', body.physical_remision_path],
+    ['activity_description', body.activity_description],
   ];
 
   for (const [column, value] of patchFields) {
