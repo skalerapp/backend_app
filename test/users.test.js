@@ -84,7 +84,7 @@ describe('Users endpoints', () => {
       });
 
     expect(res.statusCode).toBe(409);
-    expect(res.body.message).toBe('Ya existe un usuario con ese correo');
+    expect(res.body.message).toBe('Ya existe un usuario con ese usuario app');
   });
 
   it('PUT /api/users/:id updates user data and status', async () => {

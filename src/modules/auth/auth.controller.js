@@ -115,7 +115,7 @@ const login = async (req, res) => {
     if (!identifier || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Debes ingresar usuario/email y contraseña',
+        message: 'Debes ingresar usuario app y contraseña',
       });
     }
 
@@ -780,7 +780,7 @@ const exportAcceptedTermsCsv = async (req, res) => {
       'Fecha aceptación',
       'Versión términos',
       'Usuario ID',
-      'Correo',
+      'Usuario app',
       'Nombre usuario',
       'Rol',
       'Estado usuario',

@@ -208,7 +208,7 @@ const createUser = async (req, res) => {
     if (!normalizedEmail || !normalizedName || !password) {
       return res.status(400).json({
         success: false,
-        message: 'name, email y password son requeridos',
+        message: 'Nombre, usuario app y contraseña son requeridos',
       });
     }
 
@@ -256,7 +256,7 @@ const createUser = async (req, res) => {
       if (existingRows.length > 0) {
         return res.status(409).json({
           success: false,
-          message: 'Ya existe un usuario con ese correo',
+          message: 'Ya existe un usuario con ese usuario app',
         });
       }
 
@@ -316,7 +316,7 @@ const updateUser = async (req, res) => {
     if (!normalizedEmail || !normalizedName) {
       return res.status(400).json({
         success: false,
-        message: 'name y email son requeridos',
+        message: 'Nombre y usuario app son requeridos',
       });
     }
 
@@ -384,7 +384,7 @@ const updateUser = async (req, res) => {
       if (emailRows.length > 0) {
         return res.status(409).json({
           success: false,
-          message: 'Ya existe otro usuario con ese correo',
+          message: 'Ya existe otro usuario con ese usuario app',
         });
       }
 
