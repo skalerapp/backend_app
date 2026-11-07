@@ -129,6 +129,7 @@ const ensureDeliveryNotesSchema = async (connection) => {
   await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'receiving_signature_data', 'LONGTEXT NULL');
   await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'receiving_signature_name', 'VARCHAR(160) NULL');
   await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'activity_description', 'VARCHAR(255) NULL');
+  await addColumnIfMissing(connection, 'warehouse_delivery_notes', 'client_name', 'VARCHAR(255) NULL');
 };
 
 const sanitizePatchPayload = (body) => {
@@ -243,6 +244,34 @@ const loadProjectSnapshot = async (connection, projectId) => {
   return rows[0];
 };
 
+const resolveProjectClientName = async (connection, projectId) => {
+  const [oppRows] = await connection.execute(
+    `SELECT client_name
+     FROM commercial_opportunities
+     WHERE project_id = ?
+     ORDER BY updated_at DESC, id DESC
+     LIMIT 1`,
+    [projectId],
+  );
+  if (oppRows.length && normalizeText(oppRows[0].client_name)) {
+    return normalizeText(oppRows[0].client_name);
+  }
+
+  const [visitRows] = await connection.execute(
+    `SELECT client_name
+     FROM commercial_visits
+     WHERE project_id = ?
+     ORDER BY visit_date DESC, id DESC
+     LIMIT 1`,
+    [projectId],
+  );
+  if (visitRows.length && normalizeText(visitRows[0].client_name)) {
+    return normalizeText(visitRows[0].client_name);
+  }
+
+  return null;
+};
+
 const loadAssetRow = async (connection, assetId) => {
   const [rows] = await connection.execute(
     `SELECT id, asset_code, asset_name, sku_code, unit_measure, category_name, current_stock,
@@ -321,11 +350,22 @@ const mapNoteRow = (row) => ({
 const fetchDeliveryNoteById = async (connection, noteId) => {
   const [notes] = await connection.execute(
     `SELECT dn.*,
-            p.client_name AS project_client_name,
+            COALESCE(
+              dn.client_name,
+              (SELECT co.client_name
+               FROM commercial_opportunities co
+               WHERE co.project_id = dn.project_id
+               ORDER BY co.updated_at DESC, co.id DESC
+               LIMIT 1),
+              (SELECT cv.client_name
+               FROM commercial_visits cv
+               WHERE cv.project_id = dn.project_id
+               ORDER BY cv.visit_date DESC, cv.id DESC
+               LIMIT 1)
+            ) AS project_client_name,
             (SELECT COUNT(*) FROM warehouse_delivery_note_lines l
              WHERE l.delivery_note_id = dn.id AND l.line_status = 'active') AS line_count
      FROM warehouse_delivery_notes dn
-     LEFT JOIN projects p ON p.id = dn.project_id
      WHERE dn.id = ?
      LIMIT 1`,
     [noteId],
@@ -423,6 +463,7 @@ const createDeliveryNote = async (connection, req, body) => {
   }
 
   const project = await loadProjectSnapshot(connection, projectId);
+  const projectClientName = await resolveProjectClientName(connection, projectId);
   const sessionUserId = Number(req.user?.id || 0);
 
   const { remisionNumber, numberMode } = await reserveRemisionNumber(connection, {
@@ -444,20 +485,21 @@ const createDeliveryNote = async (connection, req, body) => {
 
   const [insertNote] = await connection.execute(
     `INSERT INTO warehouse_delivery_notes (
-       remision_number, number_mode, project_id, project_ot_code, project_name, activity_description,
+       remision_number, number_mode, project_id, project_ot_code, project_name, client_name, activity_description,
        status, movement_date, movement_type,
        dispatcher_user_id, dispatcher_name,
        transporter_type, transporter_user_id, transporter_name, transporter_company,
        site_receiver_name, site_receiver_user_id,
        delivery_signature_name, receiving_signature_name, receiving_signature_data,
        evidence_path, physical_remision_path, dispatch_note, notes, created_by_user_id
-     ) VALUES (?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       remisionNumber,
       numberMode,
       projectId,
       project.ot_code || null,
       project.name || null,
+      normalizeText(body.client_name) || projectClientName || null,
       normalizeText(body.activity_description) || null,
       body.movement_date || null,
       movementType,
