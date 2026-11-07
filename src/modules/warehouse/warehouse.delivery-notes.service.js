@@ -232,7 +232,7 @@ const logDeliveryNoteEvent = async (connection, {
 
 const loadProjectSnapshot = async (connection, projectId) => {
   const [rows] = await connection.execute(
-    'SELECT id, name, ot_code, status FROM projects WHERE id = ? LIMIT 1',
+    'SELECT id, name, description, ot_code, status FROM projects WHERE id = ? LIMIT 1',
     [projectId],
   );
   if (!rows.length) {
@@ -350,6 +350,7 @@ const mapNoteRow = (row) => ({
 const fetchDeliveryNoteById = async (connection, noteId) => {
   const [notes] = await connection.execute(
     `SELECT dn.*,
+            p.description AS project_description,
             COALESCE(
               dn.client_name,
               (SELECT co.client_name
@@ -366,6 +367,7 @@ const fetchDeliveryNoteById = async (connection, noteId) => {
             (SELECT COUNT(*) FROM warehouse_delivery_note_lines l
              WHERE l.delivery_note_id = dn.id AND l.line_status = 'active') AS line_count
      FROM warehouse_delivery_notes dn
+     LEFT JOIN projects p ON p.id = dn.project_id
      WHERE dn.id = ?
      LIMIT 1`,
     [noteId],
@@ -500,7 +502,7 @@ const createDeliveryNote = async (connection, req, body) => {
       project.ot_code || null,
       project.name || null,
       normalizeText(body.client_name) || projectClientName || null,
-      normalizeText(body.activity_description) || null,
+      normalizeText(body.activity_description) || normalizeText(project.description) || null,
       body.movement_date || null,
       movementType,
       header.dispatcher_user_id,
