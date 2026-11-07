@@ -244,6 +244,18 @@ const loadProjectSnapshot = async (connection, projectId) => {
   return rows[0];
 };
 
+const resolveActivityDescription = ({ activity, projectName, projectDescription }) => {
+  const custom = normalizeText(activity);
+  const name = normalizeText(projectName);
+  const description = normalizeText(projectDescription);
+  if (description) {
+    if (!custom || (name && custom.toLowerCase() === name.toLowerCase())) {
+      return description;
+    }
+  }
+  return custom || description || null;
+};
+
 const resolveProjectClientName = async (connection, projectId) => {
   const [oppRows] = await connection.execute(
     `SELECT client_name
@@ -390,8 +402,15 @@ const fetchDeliveryNoteById = async (connection, noteId) => {
     [noteId],
   );
 
+  const mapped = mapNoteRow(note);
+  mapped.activity_description = resolveActivityDescription({
+    activity: mapped.activity_description,
+    projectName: mapped.project_name,
+    projectDescription: mapped.project_description,
+  });
+
   return {
-    ...mapNoteRow(note),
+    ...mapped,
     lines,
     events,
   };
@@ -502,7 +521,11 @@ const createDeliveryNote = async (connection, req, body) => {
       project.ot_code || null,
       project.name || null,
       normalizeText(body.client_name) || projectClientName || null,
-      normalizeText(body.activity_description) || normalizeText(project.description) || null,
+      resolveActivityDescription({
+        activity: body.activity_description,
+        projectName: project.name,
+        projectDescription: project.description,
+      }),
       body.movement_date || null,
       movementType,
       header.dispatcher_user_id,
@@ -622,7 +645,17 @@ const updateDeliveryNote = async (connection, req, noteId, body) => {
   for (const [column, value] of patchFields) {
     if (value !== undefined) {
       updates.push(`${column} = ?`);
-      params.push(normalizeText(value) || null);
+      if (column === 'activity_description') {
+        params.push(
+          resolveActivityDescription({
+            activity: value,
+            projectName: note.project_name,
+            projectDescription: note.project_description,
+          }),
+        );
+      } else {
+        params.push(normalizeText(value) || null);
+      }
     }
   }
 
