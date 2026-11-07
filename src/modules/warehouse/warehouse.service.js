@@ -1,4 +1,5 @@
 const { HttpError } = require('../../utils/httpError');
+const { nowSql } = require('../../utils/datetime.utils');
 
 const normalizeText = (value) => {
   const raw = (value ?? '').toString().trim();
@@ -494,12 +495,25 @@ const ensureWarehouseShape = async (connection) => {
       changed_fields JSON NULL,
       prev_snapshot JSON NULL,
       next_snapshot JSON NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME NOT NULL,
       INDEX idx_wae_asset (asset_id),
       INDEX idx_wae_created (created_at),
       CONSTRAINT fk_wae_asset FOREIGN KEY (asset_id) REFERENCES warehouse_assets (id) ON DELETE CASCADE
     )
   `);
+
+  const [createdType] = await connection.execute(
+    `SELECT DATA_TYPE AS t
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'warehouse_asset_edits'
+       AND COLUMN_NAME = 'created_at'`,
+  );
+  if ((createdType[0]?.t || '').toLowerCase() === 'timestamp') {
+    await connection.execute(
+      'ALTER TABLE warehouse_asset_edits MODIFY COLUMN created_at DATETIME NOT NULL',
+    );
+  }
 };
 
 const ASSET_EDIT_SNAPSHOT_KEYS = [
@@ -576,12 +590,13 @@ const insertWarehouseAssetEdit = async (connection, {
   prevSnapshot,
   nextSnapshot,
 }) => {
+  const createdAt = nowSql();
   await connection.execute(
     `INSERT INTO warehouse_asset_edits (
        asset_id, user_id, user_name,
        prev_lifecycle_status, next_lifecycle_status, status_change_reason,
-       changed_fields, prev_snapshot, next_snapshot
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       changed_fields, prev_snapshot, next_snapshot, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       assetId,
       userId || null,
@@ -592,6 +607,7 @@ const insertWarehouseAssetEdit = async (connection, {
       changedFields && Object.keys(changedFields).length ? JSON.stringify(changedFields) : null,
       prevSnapshot && Object.keys(prevSnapshot).length ? JSON.stringify(prevSnapshot) : null,
       nextSnapshot && Object.keys(nextSnapshot).length ? JSON.stringify(nextSnapshot) : null,
+      createdAt,
     ],
   );
 };
