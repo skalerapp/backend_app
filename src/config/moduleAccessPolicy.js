@@ -43,7 +43,7 @@ const MODULE_ACCESS_POLICY = {
     labor_permissions: ['read', 'create', 'update'],
     activities: ['read', 'create', 'update', 'delete'],
     allowances: ['read', 'update'],
-    warehouse: ['read', 'create', 'update'],
+    warehouse: ['read', 'create', 'update', 'delete'],
     commercial: ['read', 'create', 'update'],
     hse: ['read'],
     tasks: ['read', 'create', 'update', 'delete'],

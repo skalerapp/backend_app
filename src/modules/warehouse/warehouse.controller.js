@@ -17,8 +17,10 @@ const {
   upsertWarehouseAsset,
   updateWarehouseAssetById,
   diffWarehouseAssetSnapshots,
+  buildWarehouseAssetSnapshot,
   insertWarehouseAssetEdit,
   listWarehouseAssetEdits,
+  softDeleteWarehouseAssetById,
 } = require('./warehouse.service');
 const {
   listDeliveryNotes,
@@ -67,7 +69,7 @@ const listAssets = async (req, res) => {
     const rows = await withDbConnection(async (connection) => {
       await ensureWarehouseShape(connection);
 
-      const conditions = [];
+      const conditions = ['wa.deleted_at IS NULL'];
       const params = [];
 
       if ((q || '').toString().trim().isNotEmpty) {
@@ -309,6 +311,9 @@ const updateAsset = async (req, res) => {
         throw new HttpError(404, 'Activo de almacen no encontrado');
       }
       const existingRow = existingRows[0];
+      if (existingRow.deleted_at) {
+        throw new HttpError(404, 'Activo eliminado del inventario');
+      }
       const prevLifecycle = (existingRow?.lifecycle_status ?? '').toString().trim().toLowerCase();
       const nextLifecycle = (normalized.lifecycleStatus ?? '').toString().trim().toLowerCase();
       const lifecycleChanged =
@@ -355,6 +360,54 @@ const updateAsset = async (req, res) => {
     });
   } catch (error) {
     sendControllerError(res, error, 'Error al actualizar activo de almacen');
+  }
+};
+
+const deleteAsset = async (req, res) => {
+  try {
+    const assetId = Number(req.params.id);
+    if (!Number.isFinite(assetId) || assetId <= 0) {
+      return res.status(400).json({ success: false, message: 'ID de activo inválido' });
+    }
+
+    const reason = normalizeText(req.body?.deletion_reason ?? req.body?.reason);
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Indica el motivo de eliminación (deletion_reason)',
+      });
+    }
+
+    await withDbConnection(async (connection) => {
+      await ensureWarehouseShape(connection);
+      await applyAuditContext(connection, req);
+
+      const result = await softDeleteWarehouseAssetById(connection, assetId, {
+        reason,
+        userId: Number(req.user?.id || 0) || null,
+      });
+      if (!result) {
+        throw new HttpError(404, 'Activo de almacen no encontrado');
+      }
+
+      const { before, deletedAt } = result;
+      const afterPatch = { ...before, deleted_at: deletedAt, deletion_reason: reason };
+      await insertWarehouseAssetEdit(connection, {
+        assetId,
+        userId: Number(req.user?.id || 0) || null,
+        userName: normalizeText(req.user?.name),
+        prevLifecycle: before.lifecycle_status,
+        nextLifecycle: before.lifecycle_status,
+        statusChangeReason: `Eliminación del catálogo: ${reason}`,
+        changedFields: { catalog_visibility: ['activo', 'eliminado'] },
+        prevSnapshot: buildWarehouseAssetSnapshot(before),
+        nextSnapshot: buildWarehouseAssetSnapshot(afterPatch),
+      });
+    });
+
+    res.json({ success: true, message: 'Activo eliminado del inventario' });
+  } catch (error) {
+    sendControllerError(res, error, 'Error al eliminar activo de almacen');
   }
 };
 
@@ -802,6 +855,7 @@ module.exports = {
   listDispatchReceivers,
   createAsset,
   updateAsset,
+  deleteAsset,
   listAssetEditHistory,
   importAssets,
   listMovements,

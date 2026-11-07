@@ -466,6 +466,9 @@ const ensureWarehouseShape = async (connection) => {
   await addColumnIfMissing(connection, 'warehouse_assets', 'technical_due_date', 'DATE NULL AFTER soat_due_date');
   await addColumnIfMissing(connection, 'warehouse_assets', 'intake_origin', "VARCHAR(40) NOT NULL DEFAULT 'purchase' AFTER technical_detail");
   await addColumnIfMissing(connection, 'warehouse_assets', 'intake_origin_project_id', 'INT NULL AFTER intake_origin');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'deleted_at', 'DATETIME NULL AFTER updated_at');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'deletion_reason', 'TEXT NULL AFTER deleted_at');
+  await addColumnIfMissing(connection, 'warehouse_assets', 'deleted_by_user_id', 'INT NULL AFTER deletion_reason');
 
   await addColumnIfMissing(connection, 'warehouse_asset_movements', 'quantity', 'DECIMAL(12,2) NULL AFTER evidence_path');
   await addColumnIfMissing(connection, 'warehouse_asset_movements', 'serial_snapshot', 'VARCHAR(160) NULL AFTER quantity');
@@ -802,6 +805,54 @@ const updateWarehouseAssetById = async (connection, assetId, asset) => {
   return result.affectedRows > 0;
 };
 
+const softDeleteWarehouseAssetById = async (connection, assetId, { reason, userId }) => {
+  const [existingRows] = await connection.execute(
+    'SELECT * FROM warehouse_assets WHERE id = ? LIMIT 1',
+    [assetId],
+  );
+  if (!existingRows.length) {
+    return null;
+  }
+  const existing = existingRows[0];
+  if (existing.deleted_at) {
+    throw new HttpError(404, 'El activo ya fue eliminado del inventario');
+  }
+
+  const [movRows] = await connection.execute(
+    'SELECT COUNT(*) AS c FROM warehouse_asset_movements WHERE asset_id = ?',
+    [assetId],
+  );
+  if (Number(movRows[0]?.c || 0) > 0) {
+    throw new HttpError(
+      409,
+      'No se puede eliminar: el activo tiene movimientos de almacén. Si ya no aplica, cambie el estado operativo en lugar de borrarlo.',
+    );
+  }
+
+  const [lineRows] = await connection.execute(
+    `SELECT COUNT(*) AS c FROM warehouse_delivery_note_lines
+     WHERE asset_id = ?
+       AND (line_status IS NULL OR line_status = 'active')`,
+    [assetId],
+  );
+  if (Number(lineRows[0]?.c || 0) > 0) {
+    throw new HttpError(
+      409,
+      'No se puede eliminar: el activo está vinculado a líneas de remisión activas.',
+    );
+  }
+
+  const deletedAt = nowSql();
+  await connection.execute(
+    `UPDATE warehouse_assets
+     SET deleted_at = ?, deletion_reason = ?, deleted_by_user_id = ?, updated_at = NOW()
+     WHERE id = ?`,
+    [deletedAt, reason, userId, assetId],
+  );
+
+  return { before: existing, deletedAt, reason };
+};
+
 module.exports = {
   ensureWarehouseShape,
   generateNextAssetCode,
@@ -820,6 +871,8 @@ module.exports = {
   upsertWarehouseAsset,
   updateWarehouseAssetById,
   diffWarehouseAssetSnapshots,
+  buildWarehouseAssetSnapshot,
   insertWarehouseAssetEdit,
   listWarehouseAssetEdits,
+  softDeleteWarehouseAssetById,
 };
